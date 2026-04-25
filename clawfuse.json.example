@@ -1,0 +1,20 @@
+{
+  "token": "YOUR_ACCESS_TOKEN_HERE",
+
+  "cloud_folder": "applicationData",
+  "mount_point": "/mnt/drive",
+
+  "cache_dir": "/tmp/clawfuse-cache",
+  "cache_max_mb": 512,
+  "cache_max_files": 500,
+
+  "write_buf_dir": "/tmp/clawfuse-writes",
+  "drain_interval": 5.0,
+  "drain_max_retries": 3,
+
+  "tree_refresh_ttl": 10.0,
+  "list_page_size": 200,
+
+  "http_timeout": 30,
+  "log_level": "INFO"
+}
