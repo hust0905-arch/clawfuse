@@ -1,0 +1,179 @@
+[
+  {
+    "test": "T1: 串行 list_files ×10",
+    "workers": 1,
+    "total_requests": 10,
+    "success": 10,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 6.89,
+    "qps": 1.45,
+    "avg_latency_ms": 689.4
+  },
+  {
+    "test": "T2: 并发 list_files ×20 (workers=2)",
+    "workers": 2,
+    "total_requests": 20,
+    "success": 20,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 10.36,
+    "qps": 1.93,
+    "avg_latency_ms": 518.2
+  },
+  {
+    "test": "T2: 并发 list_files ×20 (workers=4)",
+    "workers": 4,
+    "total_requests": 20,
+    "success": 20,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 5.48,
+    "qps": 3.65,
+    "avg_latency_ms": 274.1
+  },
+  {
+    "test": "T2: 并发 list_files ×20 (workers=8)",
+    "workers": 8,
+    "total_requests": 20,
+    "success": 20,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 4.32,
+    "qps": 4.63,
+    "avg_latency_ms": 215.9
+  },
+  {
+    "test": "T2: 并发 list_files ×20 (workers=16)",
+    "workers": 16,
+    "total_requests": 20,
+    "success": 20,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 4.22,
+    "qps": 4.74,
+    "avg_latency_ms": 210.8
+  },
+  {
+    "test": "T3: 重载 list_files ×50 (workers=4)",
+    "workers": 4,
+    "total_requests": 50,
+    "success": 50,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 9.91,
+    "qps": 5.04,
+    "avg_latency_ms": 198.2
+  },
+  {
+    "test": "T3: 重载 list_files ×50 (workers=8)",
+    "workers": 8,
+    "total_requests": 50,
+    "success": 50,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 8.6,
+    "qps": 5.81,
+    "avg_latency_ms": 172.0
+  },
+  {
+    "test": "T3: 重载 list_files ×50 (workers=16)",
+    "workers": 16,
+    "total_requests": 50,
+    "success": 50,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 8.63,
+    "qps": 5.79,
+    "avg_latency_ms": 172.6
+  },
+  {
+    "test": "T3: 重载 list_files ×50 (workers=32)",
+    "workers": 32,
+    "total_requests": 50,
+    "success": 50,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 8.76,
+    "qps": 5.71,
+    "avg_latency_ms": 175.2
+  },
+  {
+    "test": "T4: 混合 list + get_metadata ×30 (workers=8)",
+    "workers": 8,
+    "total_requests": 30,
+    "success": 30,
+    "failed": 0,
+    "rate_limited_429_503": 0,
+    "total_time_s": 5.1,
+    "qps": 5.88,
+    "avg_latency_ms": 170.1
+  },
+  {
+    "test": "T5: 持续10秒负载 (workers=8)",
+    "total_requests": 64,
+    "success": 64,
+    "failed": 0,
+    "rate_limited": 0,
+    "total_time_s": 11.23,
+    "qps": 5.7,
+    "per_second": [
+      {
+        "second": 1,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.237
+      },
+      {
+        "second": 2,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.32
+      },
+      {
+        "second": 3,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.365
+      },
+      {
+        "second": 5,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.43
+      },
+      {
+        "second": 6,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.589
+      },
+      {
+        "second": 8,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.381
+      },
+      {
+        "second": 9,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.451
+      },
+      {
+        "second": 11,
+        "ok": 8,
+        "fail": 0,
+        "rate_limited": 0,
+        "batch_time": 1.454
+      }
+    ]
+  }
+]
