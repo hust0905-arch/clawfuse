@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -435,3 +436,200 @@ def test_legacy_refresh_still_works(mock_client: MagicMock, sample_files: list[d
     assert tree.file_count == 4
     assert tree.resolve("/data") is not None
     assert tree.resolve("/data/report.csv") is not None
+
+
+# ── Large-scale lazy loading performance ──
+
+
+def _generate_large_tree(
+    num_dirs: int = 100,
+    files_per_dir: int = 20,
+) -> dict[str, list[dict]]:
+    """Generate a large tree for lazy loading perf tests.
+
+    Returns {parent_folder_id: [child_items]} suitable for _setup_list_files.
+    Structure: root -> dir_000 .. dir_099, each dir has files_per_dir files.
+    """
+    responses: dict[str, list[dict]] = {"root": []}
+
+    for d in range(num_dirs):
+        dir_id = f"dir_{d:04d}"
+        # Add dir to root's children
+        responses["root"].append(_make_file(dir_id, f"dir_{d:04d}", "root", is_dir=True))
+
+        children: list[dict] = []
+        # Each dir has some files
+        for f in range(files_per_dir):
+            children.append(_make_file(
+                f"f_{d:04d}_{f:04d}",
+                f"file_{f:04d}.txt",
+                dir_id,
+                size=1024 * (f + 1),
+            ))
+        # Some dirs have sub-dirs (every 10th)
+        if d % 10 == 0:
+            for sd in range(3):
+                sub_id = f"subdir_{d:04d}_{sd}"
+                children.append(_make_file(sub_id, f"sub_{sd}", dir_id, is_dir=True))
+                # Sub-dir files
+                sub_children = [
+                    _make_file(f"sf_{d:04d}_{sd}_{sf}", f"sfile_{sf}.txt", sub_id, size=512)
+                    for sf in range(5)
+                ]
+                responses[sub_id] = sub_children
+        responses[dir_id] = children
+    return responses
+
+
+def test_lazy_load_2000_files_perf() -> None:
+    """Lazy load 100 dirs × 20 files + sub-dirs = ~2200 files, measure total time."""
+    responses = _generate_large_tree(num_dirs=100, files_per_dir=20)
+    mock_client = MagicMock()
+    _setup_list_files(mock_client, responses)
+
+    tree = DirTree(mock_client, root_folder="root", refresh_ttl=3600)
+
+    start = time.perf_counter()
+    tree.background_full_load()
+    elapsed = time.perf_counter() - start
+
+    print(f"\n  Lazy load 2200+ items: {elapsed:.3f}s, {tree.file_count} items, {tree.loaded_dir_count} dirs")
+    assert tree.bg_complete is True
+    assert tree.file_count >= 2000
+    # Mock API calls should be fast — no real network
+    assert elapsed < 5.0, f"Too slow: {elapsed:.3f}s"
+
+
+def test_ensure_loaded_deep_path_with_many_siblings() -> None:
+    """ensure_loaded on deep path while many sibling dirs exist."""
+    responses = _generate_large_tree(num_dirs=100, files_per_dir=10)
+    mock_client = MagicMock()
+    _setup_list_files(mock_client, responses)
+
+    tree = DirTree(mock_client, root_folder="root", refresh_ttl=3600)
+
+    # Access a sub-dir path: root -> dir_0010 -> sub_0
+    start = time.perf_counter()
+    tree.ensure_loaded("/dir_0010/sub_0")
+    elapsed = time.perf_counter() - start
+
+    # 3 dirs loaded: root, dir_0010, subdir_0010_0
+    assert tree.loaded_dir_count == 3
+    assert tree.resolve("/dir_0010/sub_0") is not None
+    print(f"\n  ensure_loaded deep path (3 levels, 100 siblings): {elapsed*1000:.1f}ms, {tree.loaded_dir_count} dirs loaded")
+
+
+def test_concurrent_ensure_loaded_many_paths() -> None:
+    """Multiple threads ensure_loaded on different paths concurrently."""
+    responses = _generate_large_tree(num_dirs=50, files_per_dir=10)
+    mock_client = MagicMock()
+    _setup_list_files(mock_client, responses)
+
+    tree = DirTree(mock_client, root_folder="root", refresh_ttl=3600)
+
+    # Simulate 10 threads accessing different directories simultaneously
+    target_dirs = [f"/dir_{i:04d}" for i in range(0, 50, 5)]
+    errors: list[str] = []
+
+    def access_dir(dir_path: str) -> None:
+        try:
+            tree.ensure_loaded(dir_path)
+            meta = tree.resolve(dir_path)
+            assert meta is not None, f"Path {dir_path} not found after ensure_loaded"
+        except Exception as e:
+            errors.append(f"{dir_path}: {e}")
+
+    start = time.perf_counter()
+    threads = [threading.Thread(target=access_dir, args=(d,)) for d in target_dirs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    elapsed = time.perf_counter() - start
+
+    assert not errors, f"Errors: {errors}"
+    # Root + each dir loaded
+    assert tree.loaded_dir_count >= len(target_dirs) + 1
+    print(f"\n  {len(target_dirs)} concurrent ensure_loaded: {elapsed*1000:.1f}ms, {tree.loaded_dir_count} dirs loaded")
+
+
+def test_user_request_during_background_load() -> None:
+    """User accesses a dir while background_full_load is in progress."""
+    responses = _generate_large_tree(num_dirs=100, files_per_dir=10)
+    mock_client = MagicMock()
+
+    # Add artificial delay to API calls so background and user overlap
+    original_responses = dict(responses)
+
+    def slow_list_files(parent_folder=None, page_size=200, fields=None, cursor=None):
+        time.sleep(0.01)  # 10ms per API call
+        if parent_folder and parent_folder in original_responses:
+            return {"files": original_responses[parent_folder], "nextCursor": None}
+        return {"files": [], "nextCursor": None}
+
+    mock_client.list_files.side_effect = slow_list_files
+
+    tree = DirTree(mock_client, root_folder="root", refresh_ttl=3600)
+
+    # Start background load in a thread
+    bg_thread = threading.Thread(target=tree.background_full_load, daemon=True)
+    bg_thread.start()
+
+    # Wait a bit for background to start
+    time.sleep(0.05)
+
+    # User accesses a specific directory — should get result even while background is running
+    tree.ensure_loaded("/dir_0050")
+    meta = tree.resolve("/dir_0050")
+    assert meta is not None
+
+    # Wait for background to finish
+    bg_thread.join(timeout=30)
+    assert tree.bg_complete is True
+
+    print(f"\n  User request during background: dir_0050 resolved, bg loaded {tree.loaded_dir_count} dirs total")
+
+
+def test_fuse_ops_on_large_lazy_tree(tmp_path: Path) -> None:
+    """FUSE getattr/readdir on a large lazy-loaded tree."""
+    from clawfuse.cache import ContentCache
+    from clawfuse.client import DriveKitClient
+    from clawfuse.fuse import ClawFUSE
+    from clawfuse.writebuf import WriteBuffer
+
+    responses = _generate_large_tree(num_dirs=50, files_per_dir=20)
+    mock_client = MagicMock(spec=DriveKitClient)
+    mock_client.list_all_files.return_value = []
+    mock_client.download_file.return_value = b"cached content" * 100
+    _setup_list_files(mock_client, responses)
+
+    tree = DirTree(mock_client, root_folder="root", refresh_ttl=3600)
+    cache = ContentCache(tmp_path / "cache", max_bytes=50 * 1024 * 1024, max_files=500)
+    writebuf = MagicMock(spec=WriteBuffer)
+    fuse = ClawFUSE(mock_client, tree, cache, writebuf, root_folder="root")
+
+    # Phase 1: getattr on files across many directories
+    start = time.perf_counter()
+    resolved = 0
+    for d in range(0, 50, 5):
+        for f in range(5):
+            path = f"/dir_{d:04d}/file_{f:04d}.txt"
+            stat = fuse.getattr(path)
+            if stat is not None:
+                resolved += 1
+    getattr_elapsed = time.perf_counter() - start
+
+    # Phase 2: readdir on directories
+    start = time.perf_counter()
+    for d in range(0, 50, 10):
+        path = f"/dir_{d:04d}"
+        entries = fuse.readdir(path, 0)
+        assert "." in entries
+    readdir_elapsed = time.perf_counter() - start
+
+    print(f"\n  FUSE getattr x{resolved} (lazy): {getattr_elapsed*1000:.1f}ms")
+    print(f"  FUSE readdir x5 (lazy): {readdir_elapsed*1000:.1f}ms")
+    print(f"  Total dirs loaded: {tree.loaded_dir_count}")
+
+    assert resolved > 0
+    assert tree.loaded_dir_count > 10  # Should have loaded multiple directories
