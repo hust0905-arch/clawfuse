@@ -28,7 +28,7 @@
                      └─────────────────────┘
 ```
 
-**设计原则:** 元数据全量预加载 + 文件内容按需加载 + 写入异步回传。元数据操作（ls、stat）仅访问内存；文件读取走 LRU 磁盘缓存；写入先缓冲到本地，后台异步上传。
+**设计原则:** 元数据懒加载 + 后台并行预加载 + 文件内容按需加载 + 写入异步回传。挂载启动不阻塞，后台线程并行加载全部目录元数据；用户访问未加载目录时优先处理。文件读取走 LRU 磁盘缓存；写入先缓冲到本地，后台异步上传。
 
 ## 快速开始
 
@@ -45,8 +45,8 @@ pip install -e ".[fuse]"
 ```json
 {
   "token": "你的_ACCESS_TOKEN",
-  "cloud_folder": "applicationData",
-  "mount_point": "/mnt/drive"
+  "cloud_folder": "workspace",
+  "mount_point": "/home/sandbox/.openclaw/workspace"
 }
 ```
 
@@ -91,10 +91,10 @@ clawfuse --config clawfuse.json
 | `read`（缓存未命中） | **0.8-1.5s** | Drive Kit 下载 + 缓存填充 |
 | `write` | **< 100ms** | 内存缓冲，异步上传 |
 | `create` / `mkdir` | **0.6-1.0s** | Drive Kit API 调用 |
-| 挂载启动（100 文件） | **~1s** | DirTree BFS 预加载 |
-| 挂载启动（1000 文件） | **~5s** | BFS 是瓶颈 |
+| 挂载启动 | **< 0.1s** | 仅加载根目录，不阻塞；后台线程并行预加载全部元数据 |
+| 首次访问未加载目录 | **~0.8s/级** | ensure_loaded 逐级加载用户请求路径，后台继续并行加载剩余 |
 
-**核心发现:** Drive Kit 单次 API 调用有约 800ms 固定开销，与文件大小无关。缓存命中后读取加速 **3000-4000 倍**。
+**核心发现:** Drive Kit 单次 API 调用有约 800ms 固定开销，与文件大小无关。缓存命中后读取加速 **3000-4000 倍**。挂载采用懒加载，启动不阻塞，后台 8 线程并行预加载元数据。
 
 ## 项目结构
 
@@ -113,6 +113,7 @@ clawfuse/
   writebuf.py          # 写缓冲 + 异步回传
 tests/
   conftest.py          # 共享测试夹具
+  test_lazy_load.py    # 懒加载 + 并发安全测试
   test_*.py            # 单元测试 + 性能测试
 docs/
   ClawFUSE-架构设计说明书.md

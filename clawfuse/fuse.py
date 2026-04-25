@@ -57,6 +57,13 @@ class ClawFUSE:
         if path == "/":
             return self._dir_stat()
 
+        # Ensure parent directory is loaded before resolve.
+        # This must happen BEFORE the first resolve() call to prevent
+        # resolve() from triggering a legacy refresh() that would
+        # mark directories as loaded without actually fetching them.
+        parent = str(PurePosixPath(path).parent)
+        self._dirtree.ensure_loaded(parent)
+
         meta = self._dirtree.resolve(path)
         if meta is None:
             self._raise(errno.ENOENT, path)
@@ -67,6 +74,7 @@ class ClawFUSE:
 
     def readdir(self, path: str, fh: int) -> list[str]:
         """List directory contents."""
+        self._dirtree.ensure_loaded(path)
         entries = self._dirtree.list_dir(path)
         return [".", ".."] + entries
 
@@ -115,20 +123,23 @@ class ClawFUSE:
         return content[offset : offset + size]
 
     def write(self, path: str, data: bytes, offset: int, fh: int) -> int:
-        """Write data to file."""
+        """Write data to file.
+
+        Uses bytearray with slice assignment to avoid O(n^2) copies.
+        Each write extends in-place instead of copying the entire buffer.
+        """
         if fh not in self._content_map:
             # Initialize buffer with existing content if first write
             file_id = self._fh_map.get(fh, "")
             existing = self._cache.get(file_id) or b""
-            self._content_map[fh] = existing
+            self._content_map[fh] = bytearray(existing)
 
         buf = self._content_map[fh]
         # Extend buffer if needed
         end = offset + len(data)
         if end > len(buf):
-            buf = buf.ljust(end, b"\x00")
-        buf = buf[:offset] + data + buf[offset + len(data) :]
-        self._content_map[fh] = buf
+            buf.extend(b"\x00" * (end - len(buf)))
+        buf[offset : offset + len(data)] = data
         self._dirty.add(fh)
 
         return len(data)
@@ -169,13 +180,16 @@ class ClawFUSE:
 
         fh = self._alloc_fh()
         self._fh_map[fh] = file_id
-        self._content_map[fh] = b""
+        self._content_map[fh] = bytearray()
         return fh
 
     def flush(self, path: str, fh: int) -> None:
         """Flush file: enqueue dirty content to write buffer and update cache."""
         if fh in self._dirty:
             content = self._content_map.get(fh, b"")
+            # Convert bytearray to bytes for cache and write buffer
+            if isinstance(content, bytearray):
+                content = bytes(content)
             file_id = self._fh_map.get(fh, "")
             sha256 = hashlib.sha256(content).hexdigest()
             self._writebuf.enqueue(file_id, path, content, sha256)
@@ -206,10 +220,13 @@ class ClawFUSE:
         """Truncate file to specified length."""
         if fh is not None and fh in self._content_map:
             buf = self._content_map[fh]
+            if isinstance(buf, bytes):
+                buf = bytearray(buf)
+                self._content_map[fh] = buf
             if length < len(buf):
-                self._content_map[fh] = buf[:length]
+                del buf[length:]
             else:
-                self._content_map[fh] = buf.ljust(length, b"\x00")
+                buf.extend(b"\x00" * (length - len(buf)))
             self._dirty.add(fh)
             return
 
@@ -222,7 +239,7 @@ class ClawFUSE:
         if length < len(content):
             content = content[:length]
         else:
-            content = content.ljust(length, b"\x00")
+            content = content + b"\x00" * (length - len(content))
 
         sha256 = hashlib.sha256(content).hexdigest()
         self._writebuf.enqueue(meta.id, path, content, sha256)

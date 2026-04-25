@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 
@@ -85,14 +86,23 @@ class LifecycleManager:
             # 4. Resolve cloud_folder to folder ID if needed
             root_folder = self._resolve_root_folder(self._client)
 
-            # 5. Load directory tree
+            # 5. Initialize directory tree (lazy mode — no blocking BFS)
             self._dirtree = DirTree(
                 self._client,
                 root_folder=root_folder,
                 refresh_ttl=self._config.tree_refresh_ttl,
             )
-            self._dirtree.refresh()
-            file_count = self._dirtree.file_count
+
+            # Start background full load (daemon thread, does not block mount)
+            self._bg_thread = threading.Thread(
+                target=self._dirtree.background_full_load,
+                daemon=True,
+                name="clawfuse-bg-load",
+            )
+            self._bg_thread.start()
+            logger.info("Background metadata loading started")
+
+            file_count = self._dirtree.file_count  # 0 at this point
 
             # 6. Initialize cache
             self._cache = ContentCache(

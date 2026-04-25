@@ -4,7 +4,7 @@
 
 ## 架构决策
 
-**Drive Kit 是唯一的数据源。** 所有元数据在启动时通过 BFS 全量加载，文件内容按需下载，写入先缓冲到本地再异步上传。本地状态不作为权威数据。
+**Drive Kit 是唯一的数据源。** 元数据采用懒加载 + 后台并行 BFS 预加载：启动时仅加载根目录，后台线程并行加载剩余目录；用户请求未加载的目录时优先处理。文件内容按需下载，写入先缓冲到本地再异步上传。本地状态不作为权威数据。
 
 ## 模块列表
 
@@ -13,11 +13,11 @@
 | `config.py` | 冻结数据类配置。`from_env()` 读取环境变量（传统模式），`from_file()` 读取 JSON 配置文件。构造时验证。 |
 | `token.py` | 双模式令牌：文件模式（传统，60 秒重读缓存）或字符串模式（来自 JSON 配置，不可变）。 |
 | `client.py` | Drive Kit REST API 封装。所有请求自动附带 `containers=applicationData`。处理 multipart 上传。 |
-| `dirtree.py` | 内存目录树，从 Drive Kit 文件列表构建。通过父文件夹 ID 链做路径解析。 |
+| `dirtree.py` | 内存目录树，支持懒加载和后台并行预加载。`load_dir()` 按需加载单个目录，`ensure_loaded()` 按路径逐级加载，`background_full_load()` 用 ThreadPoolExecutor(8) 后台 BFS 并行加载全部目录。线程安全。 |
 | `cache.py` | LRU 磁盘缓存。文件存储为 `{sha256}.data` + `.meta` JSON 附带文件。重启后可恢复。 |
 | `writebuf.py` | 写缓冲 + 后台回传。文件以 `.buf` + `.meta` 入队，由 drain 线程上传。 |
-| `fuse.py` | FUSE 操作绑定。将文件系统调用路由到 DirTree/Cache/WriteBuffer。每个文件单写入者。 |
-| `lifecycle.py` | 生命周期管理：pre-start（令牌 + 文件夹解析 + DirTree 加载）和 pre-destroy（刷写待上传文件）。 |
+| `fuse.py` | FUSE 操作绑定。`getattr`/`readdir` 先调用 `ensure_loaded` 确保元数据已加载，再查询 DirTree。写操作使用 `bytearray` 避免大文件 O(n^2) 拷贝。每个文件单写入者。 |
+| `lifecycle.py` | 生命周期管理：pre-start（令牌 + 文件夹解析 + 启动后台元数据加载线程，不阻塞挂载）和 pre-destroy（刷写待上传文件）。 |
 | `mount.py` | CLI 入口。`--config` 指定 JSON 配置文件，否则回退到环境变量。信号处理器实现优雅关闭。 |
 | `exceptions.py` | `DriveKitError`、`TokenError`、`ConfigError`、`MountError`。 |
 
@@ -40,7 +40,8 @@ mypy clawfuse/                   # 类型检查
 - **文件夹 ID vs 文件夹名称。** 启动时解析云端文件夹：`"applicationData"` 直接使用，短名称通过 `list_files` 查找，长字符串（20+ 字符）视为文件夹 ID。
 - **配置不可变。** `Config` 是 `@dataclass(frozen=True)`。修改时需创建新的 Config 实例。
 - **所有文件 UTF-8 编码。** 令牌文件、配置文件、源代码均使用 UTF-8。
+- **挂载子文件夹。** 设置 `cloud_folder: "workspace"` 可将 Drive Kit 根目录下的 `workspace` 子文件夹挂载到本地，其余文件（如打包备份）不会出现在 FUSE 中。
 
 ## 测试
 
-共 142 个测试（约 83% 覆盖率）。单元测试使用 mock DriveKitClient，不调用真实 API。真实 API 测试在 `tests/test_real_perf.py` 中，标记为 `pytest.mark.realapi`，需要有效令牌。
+共 160 个测试。单元测试使用 mock DriveKitClient，不调用真实 API。真实 API 测试在 `tests/test_real_perf.py` 中，标记为 `pytest.mark.realapi`，需要有效令牌。懒加载相关测试在 `tests/test_lazy_load.py`（18 个），覆盖 load_dir、ensure_loaded、background_full_load、并发安全及 FUSE 集成。
