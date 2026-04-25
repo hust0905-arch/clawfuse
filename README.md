@@ -1,19 +1,19 @@
 # ClawFUSE
 
-Drive Kit cloud storage FUSE mount for OpenClaw containers. Mounts Huawei Drive Kit `applicationData` as a local filesystem, providing transparent read/write access for containerized AI agents.
+将华为 Drive Kit 云存储挂载为本地 FUSE 文件系统，为 OpenClaw 容器内的 AI Agent 提供透明读写能力。
 
-## Architecture
+## 架构
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    Container (OpenClaw)                   │
+│                    容器 (OpenClaw)                        │
 │                                                          │
 │  Agent ──► /mnt/drive/  ──► ClawFUSE                     │
 │                               │                          │
 │                    ┌──────────┼──────────┐                │
 │                    │          │          │                │
 │                DirTree    Cache     WriteBuffer           │
-│               (metadata)  (reads)    (writes)             │
+│               (元数据)    (读缓存)   (写缓冲)              │
 │                    │          │          │                │
 │                    └──────────┼──────────┘                │
 │                               │                          │
@@ -23,121 +23,122 @@ Drive Kit cloud storage FUSE mount for OpenClaw containers. Mounts Huawei Drive 
                                 │  HTTPS
                                 ▼
                      ┌─────────────────────┐
-                     │   Drive Kit Cloud   │
-                     │  (Huawei Cloud)     │
+                     │   Drive Kit 云端    │
+                     │  (华为云)            │
                      └─────────────────────┘
 ```
 
-**Design principle:** Full metadata preload + lazy file content loading + async write drain. Metadata operations (ls, stat) hit memory only. File reads go through an LRU disk cache. Writes buffer locally and drain to Drive Kit in the background.
+**设计原则:** 元数据全量预加载 + 文件内容按需加载 + 写入异步回传。元数据操作（ls、stat）仅访问内存；文件读取走 LRU 磁盘缓存；写入先缓冲到本地，后台异步上传。
 
-## Quick Start
+## 快速开始
 
-### 1. Install
+### 1. 安装
 
 ```bash
 pip install -e ".[fuse]"
 ```
 
-### 2. Create config file
+### 2. 创建配置文件
 
-Copy `clawfuse.json.example` to `clawfuse.json` and fill in your Drive Kit access token:
+复制 `clawfuse.json.example` 为 `clawfuse.json`，填入 Drive Kit 访问令牌：
 
 ```json
 {
-  "token": "YOUR_ACCESS_TOKEN",
+  "token": "你的_ACCESS_TOKEN",
   "cloud_folder": "applicationData",
   "mount_point": "/mnt/drive"
 }
 ```
 
-### 3. Mount
+### 3. 挂载
 
 ```bash
 clawfuse --config clawfuse.json
 ```
 
-## Configuration
+## 配置说明
 
-Create a `clawfuse.json` file (see `clawfuse.json.example`):
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `token` | string | **必填** | Drive Kit OAuth 访问令牌 |
+| `cloud_folder` | string | `"applicationData"` | 云端文件夹名称或 ID |
+| `mount_point` | string | `"/mnt/drive"` | 本地 FUSE 挂载点 |
+| `cache_dir` | string | `"/tmp/clawfuse-cache"` | 磁盘缓存目录 |
+| `cache_max_mb` | int | `512` | 缓存上限 (MB) |
+| `cache_max_files` | int | `500` | 最大缓存文件数 |
+| `write_buf_dir` | string | `"/tmp/clawfuse-writes"` | 写缓冲目录 |
+| `drain_interval` | float | `5.0` | 后台上传间隔 (秒) |
+| `drain_max_retries` | int | `3` | 上传失败最大重试次数 |
+| `tree_refresh_ttl` | float | `10.0` | 目录树刷新间隔 (秒) |
+| `list_page_size` | int | `200` | Drive Kit 列表接口每页条数 |
+| `http_timeout` | int | `30` | HTTP 请求超时 (秒) |
+| `log_level` | string | `"INFO"` | 日志级别 |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `token` | string | **required** | Drive Kit OAuth access token |
-| `cloud_folder` | string | `"applicationData"` | Cloud folder name or ID to mount |
-| `mount_point` | string | `"/mnt/drive"` | Local FUSE mount point |
-| `cache_dir` | string | `"/tmp/clawfuse-cache"` | Disk cache directory |
-| `cache_max_mb` | int | `512` | Max cache size in MB |
-| `cache_max_files` | int | `500` | Max cached files |
-| `write_buf_dir` | string | `"/tmp/clawfuse-writes"` | Write buffer directory |
-| `drain_interval` | float | `5.0` | Seconds between background uploads |
-| `drain_max_retries` | int | `3` | Max retries per failed upload |
-| `tree_refresh_ttl` | float | `10.0` | Seconds between DirTree refreshes |
-| `list_page_size` | int | `200` | Drive Kit list API page size |
-| `http_timeout` | int | `30` | HTTP request timeout in seconds |
-| `log_level` | string | `"INFO"` | Logging level |
+### 云端文件夹
 
-### Cloud folder
+- `"applicationData"` — 默认容器数据文件夹，直接使用，无需解析
+- 文件夹名称（如 `"workspace"`）— 启动时通过 `list_files` 解析为 ID
+- 文件夹 ID（20+ 字符的字符串）— 直接使用
 
-- `"applicationData"` — default container data folder (no resolution needed)
-- A folder name (e.g. `"workspace"`) — resolved to ID at startup via `list_files`
-- A folder ID (20+ character string) — used directly
+## 性能
 
-## Performance
+基于真实 Drive Kit API 测量（2026-04-24，中国大陆网络）：
 
-Based on real Drive Kit API measurements (2026-04-24, China mainland network):
+| 操作 | 延迟 | 说明 |
+|------|------|------|
+| `getattr` / `readdir` | **< 0.02ms** | 纯内存，无 API 调用 |
+| `read`（缓存命中） | **~0.2ms** | 磁盘缓存读取 |
+| `read`（缓存未命中） | **0.8-1.5s** | Drive Kit 下载 + 缓存填充 |
+| `write` | **< 100ms** | 内存缓冲，异步上传 |
+| `create` / `mkdir` | **0.6-1.0s** | Drive Kit API 调用 |
+| 挂载启动（100 文件） | **~1s** | DirTree BFS 预加载 |
+| 挂载启动（1000 文件） | **~5s** | BFS 是瓶颈 |
 
-| Operation | Latency | Notes |
-|-----------|---------|-------|
-| `getattr` / `readdir` | **< 0.02ms** | Pure memory — no API call |
-| `read` (cache hit) | **~0.2ms** | Disk cache read |
-| `read` (cache miss) | **0.8-1.5s** | Drive Kit download + cache fill |
-| `write` | **< 100ms** | In-memory buffer, async upload |
-| `create` / `mkdir` | **0.6-1.0s** | Drive Kit API call |
-| Mount startup (100 files) | **~1s** | DirTree BFS preload |
-| Mount startup (1000 files) | **~5s** | BFS is the bottleneck |
+**核心发现:** Drive Kit 单次 API 调用有约 800ms 固定开销，与文件大小无关。缓存命中后读取加速 **3000-4000 倍**。
 
-**Key insight:** Drive Kit has ~800ms fixed API overhead per call regardless of file size. Cache hit provides **3000-4000x** speedup over direct API access.
-
-## Project Structure
+## 项目结构
 
 ```
 clawfuse/
-  __init__.py          # Package init
-  cache.py             # LRU disk cache (ContentCache)
-  client.py            # Drive Kit REST API client
-  config.py            # Config dataclass (from_env / from_file)
-  dirtree.py           # In-memory directory tree (DirTree)
-  exceptions.py        # Custom exceptions
-  fuse.py              # FUSE operations (ClawFUSE)
-  lifecycle.py         # Pre-start / pre-destroy lifecycle
-  mount.py             # CLI entry point
-  token.py             # Token manager (file or string mode)
-  writebuf.py          # Write buffer with async drain
+  __init__.py          # 包初始化
+  cache.py             # LRU 磁盘缓存 (ContentCache)
+  client.py            # Drive Kit REST API 客户端
+  config.py            # 配置数据类 (from_env / from_file)
+  dirtree.py           # 内存目录树 (DirTree)
+  exceptions.py        # 自定义异常
+  fuse.py              # FUSE 操作绑定 (ClawFUSE)
+  lifecycle.py         # 生命周期管理 (pre-start / pre-destroy)
+  mount.py             # CLI 入口
+  token.py             # 令牌管理器 (文件模式 / 字符串模式)
+  writebuf.py          # 写缓冲 + 异步回传
 tests/
-  conftest.py          # Shared fixtures
-  test_*.py            # Unit + perf tests
+  conftest.py          # 共享测试夹具
+  test_*.py            # 单元测试 + 性能测试
 docs/
   ClawFUSE-架构设计说明书.md
   ClawFUSE-详细设计说明书.md
   ClawFUSE-性能测试报告.md
 ```
 
-## Development
+## 开发
 
 ```bash
-# Install dev dependencies
+# 安装开发依赖
 pip install -e ".[dev]"
 
-# Run tests
+# 运行测试
 pytest tests/
 
-# Run linter
+# 跳过真实 API 测试
+pytest tests/ -k "not realapi"
+
+# 代码检查
 ruff check clawfuse/ tests/
 
-# Type check
+# 类型检查
 mypy clawfuse/
 ```
 
-## License
+## 许可证
 
 MIT
