@@ -1,943 +1,475 @@
 # ClawFUSE 详细设计说明书
 
-> 版本: 1.0 | 日期: 2026-04-24
-> 基于架构设计说明书 v1.0
+> 版本: 2.0 | 日期: 2026-04-26
+> 基于: ClawFUSE 架构设计说明书 v2.0
+
+---
 
 ## 1. 概述
 
-本文档基于 ClawFUSE 架构设计说明书，详细描述各模块的接口定义、数据结构、核心流程和实现细节。
+本文档详细描述 ClawFUSE 各模块的接口定义、数据结构、核心算法和实现细节，作为开发参考。
 
-### 1.1 系统范围
+## 2. 数据结构
 
-ClawFUSE 在 OpenClaw 容器内运行，将华为 Drive Kit 云存储挂载为本地文件系统。仅涉及单容器场景，不包含多设备同步、分布式锁、事件系统。
-
-### 1.2 术语
-
-参见架构设计说明书 §1.3 术语表。
-
-### 1.3 参考文档
-
-- ClawFUSE 架构设计说明书 v1.0
-- 华为 Drive Kit REST API 文档
-- MemexFS 详细设计说明书（模式参考）
-
-## 2. 数据结构定义
-
-### 2.1 Config（配置）
+### 2.1 Config
 
 ```python
 @dataclass(frozen=True)
 class Config:
-    # 必需
-    token_file: Path          # access_token 文件路径
+    # 令牌（二选一）
+    token_file: Path | None        # 文件模式：access_token 文件路径
+    token_string: str | None       # 字符串模式：access_token 直接值（JSON 配置）
 
-    # 可选（有默认值）
-    mount_point: str          # FUSE 挂载点，默认 "/mnt/drive"
-    root_folder: str          # Drive Kit 根文件夹 ID，默认 "applicationData"
-    cache_dir: Path           # 缓存目录，默认 "/tmp/clawfuse-cache"
-    cache_max_bytes: int      # 最大缓存字节数，默认 536870912 (512MB)
-    cache_max_files: int      # 最大缓存文件数，默认 500
-    write_buf_dir: Path       # 写缓冲目录，默认 "/tmp/clawfuse-writes"
-    drain_interval: float     # 写排空间隔秒，默认 5.0
-    drain_max_retries: int    # 上传重试次数，默认 3
-    tree_refresh_ttl: float   # 目录树刷新 TTL 秒，默认 10.0
-    list_page_size: int       # Drive Kit list 分页大小，默认 200
-    http_timeout: int         # HTTP 请求超时秒，默认 30
-    log_level: str            # 日志级别，默认 "INFO"
+    # 挂载
+    mount_point: str               # FUSE 挂载点，默认 "/mnt/drive"
+    cloud_folder: str              # 云端文件夹，默认 "applicationData"
+    root_folder: str               # 解析后的文件夹 ID（内部使用）
+
+    # 缓存
+    cache_dir: Path                # 默认 "/tmp/clawfuse-cache"
+    cache_max_bytes: int           # 默认 536870912 (512MB)
+    cache_max_files: int           # 默认 500
+
+    # 写缓冲
+    write_buf_dir: Path            # 默认 "/tmp/clawfuse-writes"
+    drain_interval: float          # 默认 5.0s
+    drain_max_retries: int         # 默认 3
+
+    # 元数据
+    tree_refresh_ttl: float        # 默认 10.0s
+    list_page_size: int            # 默认 100（API 上限 100）
+
+    # 网络
+    http_timeout: int              # 默认 30s
+    log_level: str                 # 默认 "INFO"
 ```
 
-**从环境变量映射**：
+初始化方式: `from_env()`（环境变量）/ `from_file(path)`（JSON 配置文件）。构造时验证所有字段。
 
-| 环境变量 | 字段 | 转换 |
-|---------|------|------|
-| `CLAWFUSE_TOKEN_FILE` | `token_file` | `Path(value)` |
-| `CLAWFUSE_MOUNT_POINT` | `mount_point` | 直传 |
-| `CLAWFUSE_ROOT_FOLDER` | `root_folder` | 直传 |
-| `CLAWFUSE_CACHE_DIR` | `cache_dir` | `Path(value)` |
-| `CLAWFUSE_CACHE_MAX_MB` | `cache_max_bytes` | `int(value) * 1024 * 1024` |
-| `CLAWFUSE_CACHE_MAX_FILES` | `cache_max_files` | `int(value)` |
-| `CLAWFUSE_WRITE_BUF_DIR` | `write_buf_dir` | `Path(value)` |
-| `CLAWFUSE_DRAIN_INTERVAL` | `drain_interval` | `float(value)` |
-| `CLAWFUSE_LOG_LEVEL` | `log_level` | 直传 |
+`cloud_folder` 解析规则:
+- `"applicationData"` → 启动时通过 `_discover_application_data_root()` 发现真实根 ID
+- 文件夹名称 → 发现根 ID 后 `list_files` 查找同名文件夹
+- 文件夹 ID（≥ 20 字符）→ 直接使用
 
-### 2.2 FileMeta（文件元数据）
+### 2.2 FileMeta
 
 ```python
 @dataclass(frozen=True)
 class FileMeta:
     id: str                   # Drive Kit 文件 ID
     name: str                 # 文件名
-    is_dir: bool              # 是否为目录
-    size: int                 # 文件大小（字节），目录为 0
-    sha256: str               # SHA-256 哈希，目录为 ""
-    parent_id: str            # 父目录 ID，根为 ""
-    modified_time: str        # ISO 8601 时间戳
+    is_dir: bool              # 是否目录
+    size: int                 # 字节数（目录为 0）
+    sha256: str               # SHA-256（目录为 ""）
+    parent_id: str            # 父目录 ID（根为 ""）
+    modified_time: str        # ISO 8601
 ```
 
-### 2.3 CacheEntry（缓存条目）
+### 2.3 CacheEntry
 
 ```python
 @dataclass(frozen=True)
 class CacheEntry:
-    file_id: str              # Drive Kit 文件 ID
-    path: str                 # 文件逻辑路径
-    size: int                 # 文件大小
-    sha256: str               # 内容 SHA-256
-    last_access: float        # 最后访问时间戳（time.time()）
-    disk_path: Path           # 磁盘上的 .content 文件路径
+    file_id: str
+    path: str
+    size: int
+    sha256: str
+    last_access: float        # time.time()
+    disk_path: Path
 ```
 
-### 2.4 PendingWrite（待写入）
+### 2.4 PendingWrite
 
 ```python
 @dataclass
 class PendingWrite:
-    file_id: str              # Drive Kit 文件 ID
-    path: str                 # 文件逻辑路径
-    content: bytes            # 文件内容
-    sha256: str               # 内容 SHA-256
-    queued_at: float          # 入队时间戳
-    retry_count: int          # 已重试次数
+    file_id: str
+    path: str
+    content: bytes
+    sha256: str
+    queued_at: float
+    retry_count: int
     status: str               # "pending" | "uploading" | "failed"
 ```
 
 ### 2.5 异常层级
 
 ```
-ClawFUSEError (base)
-├── ConfigError           # 配置缺失或无效
-├── TokenError            # Token 读取失败
-├── DriveKitError         # Drive Kit API 错误
-│   └── .status_code: int
-│   └── .body: str
-├── CacheError            # 缓存 I/O 错误
-├── SyncError             # 写入同步失败
-│   └── .file_id: str
-│   └── .attempts: int
-└── MountError            # FUSE 挂载失败
+DriveKitError(status_code, body)  # Drive Kit API 错误
+TokenError                        # Token 读取/验证失败
+ConfigError                       # 配置缺失或无效
+MountError                        # FUSE 挂载失败
+WriteBufferError                  # 写缓冲冲突（如重复写入同一文件）
 ```
 
-## 3. 模块详细设计
+## 3. 模块设计
 
-### 3.1 token.py — Token 管理
+### 3.1 token.py — 令牌管理
 
-#### 接口
+**双模式设计**:
+
+| 模式 | 工厂方法 | 特性 |
+|------|---------|------|
+| 文件模式 | `from_file(path)` | 60 秒缓存重读；401 时 force_reread()；外部负责更新文件 |
+| 字符串模式 | `from_string(token)` | 不可变；来自 JSON 配置；force_reread() 抛出 TokenError |
 
 ```python
 class TokenManager:
-    def __init__(self, token_file: Path) -> None:
-        """初始化，设置 token 文件路径。"""
-
     @property
     def access_token(self) -> str:
-        """获取有效的 access_token。
-        - 首次调用时读取文件
-        - 缓存到内存
-        - 距上次读取超过 60 秒则重新读取
-        """
+        """文件模式：距上次读取 > 60s 则重读文件。字符串模式：直接返回。"""
 
     def force_reread(self) -> str:
-        """强制重新读取 token 文件。
-        - 在 401 错误时调用
-        - 返回新的 token
-        - 如果文件内容未变，返回相同 token
-        """
+        """强制重读。文件模式：返回文件内容。字符串模式：抛出 TokenError。"""
 ```
 
-#### Token 文件格式
+401 处理: DriveKitClient 调用 force_reread() → token 变化则重试一次 → 未变则抛出 TokenError。
 
-**纯文本模式**（推荐）：
-```
-YAABhRMbW1...（一行，纯 access_token 字符串）
-```
+### 3.2 client.py — Drive Kit REST API 客户端
 
-**JSON 模式**（可选）：
-```json
-{
-  "access_token": "YAABhRMbW1...",
-  "expires_at": 1713849600
-}
-```
-
-#### 401 处理流程
-
-```
-DriveKitClient API 调用
-    │
-    ├─ 返回 401 Unauthorized
-    │
-    ▼
-token.force_reread()
-    │  重新读取 token 文件
-    │
-    ├─ token 变化 → 使用新 token 重试一次
-    └─ token 未变 → 抛出 TokenError("token 无效且未更新")
-```
-
-### 3.2 client.py — Drive Kit 客户端
-
-#### 接口
+**所有请求自动附带**: `containers=applicationData`
 
 ```python
-class DriveKitClient:
-    def __init__(self, token_manager: TokenManager, config: Config) -> None:
-        """初始化，注入 token 管理器和配置。"""
-
-    # ── 文件操作 ──
-
-    def create_file(
-        self,
-        filename: str,
-        content: bytes,
-        mime_type: str = "application/octet-stream",
-        parent_folder: str = "applicationData",
-        fields: str = "id,fileName,sha256,size",
-    ) -> dict:
-        """创建文件。使用 multipart/related 上传。
-        返回包含 fields 中指定字段的字典。"""
-
-    def update_file(
-        self,
-        file_id: str,
-        content: bytes,
-        mime_type: str = "application/octet-stream",
-        fields: str = "id,fileName,sha256,size",
-    ) -> dict:
-        """更新文件内容。使用 multipart/related PATCH。
-        返回包含 fields 中指定字段的字典。"""
-
-    def get_file(self, file_id: str, fields: str = "*") -> dict:
-        """获取文件元数据。返回完整元数据字典。"""
-
-    def download_file(self, file_id: str) -> bytes:
-        """下载文件内容。返回原始字节。"""
-
-    def delete_file(self, file_id: str) -> None:
-        """删除文件（移入回收站）。"""
-
-    # ── 文件夹操作 ──
-
-    def create_folder(
-        self,
-        folder_name: str,
-        parent_folder: str = "applicationData",
-        fields: str = "id,fileName",
-    ) -> dict:
-        """创建文件夹。mimeType = FOLDER_MIME。"""
-
-    # ── 列表操作 ──
-
-    def list_files(
-        self,
-        parent_folder: str | None = None,
-        page_size: int = 200,
-        fields: str = "files(id,fileName,mimeType,sha256,size,parentFolder,modifiedTime),nextCursor",
-        cursor: str | None = None,
-    ) -> dict:
-        """列出文件。返回 {"files": [...], "nextCursor": "..."}。
-        如果 cursor 存在，继续分页。"""
-
-    # ── 内部方法 ──
-
-    def _request(self, method: str, url: str, **kwargs) -> requests.Response:
-        """发送 HTTP 请求，401 时重试一次。"""
-
-    @property
-    def _auth_headers(self) -> dict[str, str]:
-        """返回 Authorization header。"""
+@staticmethod
+def _params(**extra):
+    return {"containers": "applicationData", **extra}
 ```
 
-#### Multipart 上传格式
+#### 接口定义
 
+| 方法 | HTTP | 说明 |
+|------|------|------|
+| `create_file(filename, content, parent_folder)` | POST multipart/related | 创建文件 |
+| `update_file(file_id, content)` | PATCH multipart/related | 更新文件内容 |
+| `get_file(file_id)` | GET | 获取元数据 |
+| `download_file(file_id)` | GET `?form=content` | 下载文件内容 |
+| `delete_file(file_id)` | DELETE | 删除（移入回收站） |
+| `create_folder(name, parent_folder)` | POST JSON | 创建文件夹 |
+| `update_metadata(file_id, **meta)` | PATCH JSON | 更新元数据（fileName, parentFolder） |
+| `list_files(parent_folder, page_size, cursor)` | GET | 列出文件（queryParam 过滤） |
+| `list_all_files(root_folder)` | GET × N | BFS 递归列出全部（legacy） |
+
+#### queryParam 过滤
+
+```python
+def list_files(self, parent_folder=None, page_size=100, cursor=None):
+    p = self._params(pageSize=str(page_size))
+    if parent_folder:
+        p["queryParam"] = f"'{parent_folder}' in parentFolder"  # Google Drive 风格
+    if cursor:
+        p["pageCursor"] = cursor
 ```
-POST/PATCH {UPLOAD_BASE}/files[/{file_id}]
-Content-Type: multipart/related; boundary={boundary}
 
---{boundary}
-Content-Type: application/json; charset=UTF-8
+- 不传 `parent_folder` → 返回容器内全部文件（不区分层级）
+- 传 `parent_folder` → 仅返回该目录的直系子项
 
-{"fileName": "report.csv", "mimeType": "text/csv", "parentFolder": ["folderId"]}
+#### parentFolder 字段兼容
 
---{boundary}
-Content-Type: text/csv
+API 返回的 `parentFolder` 可能是两种格式，代码自动兼容:
 
-（文件内容二进制数据）
-
---{boundary}--
+```python
+parent_id = (parents[0]["id"] if isinstance(parents[0], dict) else parents[0]) if parents else ""
 ```
+
+#### 401 自动重试
+
+所有 API 调用包裹在 `_retry_on_401` 中: 调用 → 401 → force_reread → 重试一次 → 仍 401 则抛出。
 
 ### 3.3 dirtree.py — 目录树
 
-#### 接口
+**三级加载策略**:
+
+| 方法 | 触发方 | 用途 | 延迟 |
+|------|--------|------|------|
+| `load_dir(dir_id)` | ensure_loaded / background_full_load | 加载单个目录的直系子项 | ~800ms |
+| `ensure_loaded(dir_path)` | FUSE getattr/readdir | 从根逐级加载到目标路径 | 0.8s × 层数 |
+| `background_full_load(8)` | LifecycleManager 后台线程 | 8 线程 BFS 加载全部目录 | ~20s / 1110 目录 |
+
+#### 并发模型
+
+```
+                          ┌── _loaded_dirs: set[str]  ── 已加载目录 ID
+DirTree._lock (Mutex) ────┤
+                          ├── _loading: set[str]      ── 正在加载的目录 ID
+                          └── _load_condition          ── wait/notify 协调
+
+load_dir(dir_id):
+  fast path:  dir_id in _loaded_dirs → return (无锁，GIL set 查询)
+  slow path:  acquire _lock
+              ├─ double-check _loaded_dirs
+              ├─ dir_id in _loading → Condition.wait()（零 CPU）
+              └─ add to _loading → release lock → API 调用
+                  → acquire lock → remove from _loading → notify_all()
+```
+
+同一目录只加载一次。并发请求同一目录时，先到者执行 API 调用，后到者 Condition.wait() 等待完成。
+
+#### _load_dir_from_api 流程
+
+```
+API: list_files(parent_folder=dir_id) → queryParam='{dir_id}' in parentFolder
+  │
+  ├─ 分页: while nextCursor → 继续请求（防重复 cursor）
+  │
+  ├─ 遍历子项:
+  │   ├── 跳过隐藏文件（.开头）和空名称
+  │   ├── 兼容 parentFolder 字段格式（str/dict）
+  │   ├── 解析完整路径（_resolve_path_for）
+  │   └── 更新 _path_map, _id_map, _children_map
+  │
+  └─ _loaded_dirs.add(dir_id)
+```
+
+#### 路径解析算法
+
+从 parentFolder 链向上追溯到根目录，拼接各层名称:
 
 ```python
-class DirTree:
-    def __init__(self, client: DriveKitClient, root_folder: str, refresh_ttl: float = 10.0) -> None:
-        """初始化，设置根文件夹和刷新 TTL。"""
-
-    def refresh(self) -> None:
-        """从 Drive Kit 加载全量文件元数据，构建目录树。
-        - 分页拉取所有文件（pageSize=200）
-        - 按 parentFolder 递归构建路径
-        - 过滤隐藏文件（以 . 开头）
-        """
-
-    def resolve(self, path: str) -> FileMeta | None:
-        """将路径解析为 FileMeta。
-        如果 TTL 过期，先 refresh 再解析。
-        路径格式："/data/subdir/file.txt"
-        """
-
-    def list_dir(self, path: str) -> list[str]:
-        """列举目录下直接子项名称。
-        路径 "/" 表示根目录。
-        返回文件/文件夹名称列表。
-        """
-
-    def get_path(self, file_id: str) -> str | None:
-        """file_id 反查路径。"""
-
-    def add_entry(self, path: str, meta: FileMeta) -> None:
-        """添加新文件/目录条目（create/mkdir 后调用）。"""
-
-    def remove_entry(self, path: str) -> None:
-        """移除条目（unlink/rmdir 后调用）。"""
-
-    def move_entry(self, old_path: str, new_path: str) -> None:
-        """移动/重命名条目。"""
-
-    @property
-    def file_count(self) -> int:
-        """当前文件+目录总数。"""
-
-    @property
-    def last_refresh_time(self) -> float:
-        """上次刷新时间戳。"""
+def _resolve_path_for(item_id, parent_id, name, cache):
+    if not parent_id or parent_id == root_folder:
+        return "/" + name                    # 根级文件
+    parent_path = resolve_cached(parent_id)  # 查缓存 + 已有 path_map
+    return parent_path + "/" + name
 ```
 
-#### 启动加载流程
+使用 `path_cache: dict[str, str]` 缓存已解析路径，避免重复计算。
 
-```
-DirTree.refresh()
-    │
-    ├─ 1. GET /files?parentFolder={root}&pageSize=200
-    │     → 获取根目录第一页
-    │
-    ├─ 2. 如果有 nextCursor → 继续分页
-    │     → 合并所有 files
-    │
-    ├─ 3. 识别子文件夹 → 对每个子文件夹递归 list_files
-    │     → BFS 遍历所有层级
-    │
-    ├─ 4. 构建 _path_map: dict[str, FileMeta]
-    │     path → FileMeta
-    │     如 "/data/report.csv" → FileMeta(...)
-    │
-    ├─ 5. 构建 _id_map: dict[str, str]
-    │     file_id → path
-    │     如 "abc123" → "/data/report.csv"
-    │
-    └─ 6. 记录 last_refresh_time
-```
+#### 核心索引
 
-#### 路径构建算法
+| 索引 | 类型 | 用途 |
+|------|------|------|
+| `_path_map` | `dict[str, FileMeta]` | 路径 → 元数据（getattr 查询） |
+| `_id_map` | `dict[str, str]` | 文件 ID → 路径（反向查找） |
+| `_children_map` | `dict[str, list[FileMeta]]` | 目录 ID → 子项列表（readdir 查询） |
 
-```python
-def _build_path(self, file_id: str, id_to_raw: dict) -> str:
-    """从 file_id 递归构建完整路径。
+### 3.4 cache.py — LRU 磁盘缓存
 
-    通过 parentFolder chain 向上追溯直到根目录，
-    拼接各层文件夹名称形成完整路径。
-    """
-    parts = []
-    current_id = file_id
-    while current_id and current_id != self._root_folder:
-        raw = id_to_raw.get(current_id)
-        if not raw:
-            break
-        parts.append(raw["fileName"])
-        parents = raw.get("parentFolder", [])
-        current_id = parents[0]["id"] if parents else ""
-    return "/" + "/".join(reversed(parts))
-```
-
-### 3.4 cache.py — 磁盘 LRU 缓存
-
-#### 接口
-
-```python
-class ContentCache:
-    def __init__(self, cache_dir: Path, max_bytes: int, max_files: int) -> None:
-        """初始化缓存。
-        - 创建 cache_dir（如不存在）
-        - 启动时扫描已有 .meta 文件，重建 LRU 索引
-        """
-
-    def get(self, file_id: str) -> bytes | None:
-        """获取缓存内容。
-        - 查找 LRU 索引
-        - 从磁盘读取 .content 文件
-        - 更新 last_access，移动到 LRU 尾部
-        - 返回 bytes，未命中返回 None
-        """
-
-    def put(self, file_id: str, path: str, content: bytes, sha256: str) -> None:
-        """存入缓存。
-        - 原子写入 .content 文件（先写 .tmp 再 rename）
-        - 写入 .meta sidecar
-        - 添加到 LRU 索引
-        - 如超出 max_bytes，执行淘汰
-        """
-
-    def invalidate(self, file_id: str) -> None:
-        """使缓存条目失效。
-        - 从索引中移除
-        - 删除 .content 和 .meta 文件
-        """
-
-    def contains(self, file_id: str) -> bool:
-        """检查是否在缓存中。"""
-
-    @property
-    def total_bytes(self) -> int:
-        """当前缓存总字节数。"""
-
-    @property
-    def entry_count(self) -> int:
-        """当前缓存条目数。"""
-```
-
-#### 磁盘布局
+**磁盘布局**:
 
 ```
 {cache_dir}/
-├── ab/                         # file_id 前两个字符作为子目录
-│   ├── abcdef123456.content    # 原始文件字节
-│   └── abcdef123456.meta       # JSON 元信息
-├── 9f/
-│   ├── 9f45678901234.content
-│   └── 9f45678901234.meta
+├── ab/
+│   ├── abcdef123.data       # 文件内容
+│   └── abcdef123.meta       # JSON {file_id, path, size, sha256, last_access}
 └── ...
 ```
 
-#### .meta 文件格式
+文件 ID 前两个字符作为子目录，避免单目录文件过多。
 
-```json
-{
-  "file_id": "abcdef123456",
-  "path": "/data/report.csv",
-  "size": 12345,
-  "sha256": "a1b2c3d4...",
-  "last_access": 1713849600.123
-}
-```
+**LRU 实现**: `OrderedDict[str, CacheEntry]`，访问时 `move_to_end()`，淘汰时 `popitem(last=False)` 弹出最久未访问。
 
-#### LRU 淘汰算法
+**原子写入**: 先写 `.tmp` 临时文件，再 `rename` 为目标文件，防止写入中断导致数据损坏。
 
-```python
-# 内部数据结构
-_lru: OrderedDict[str, CacheEntry]  # file_id → entry，按访问顺序
-_total_bytes: int
+**启动恢复**: 扫描 `cache_dir` 下所有 `.meta` 文件，重建 LRU 索引。上次缓存自动可用。
 
-def _evict_if_needed(self) -> None:
-    """淘汰超出预算的条目。"""
-    while self._total_bytes > self._max_bytes and self._lru:
-        # OrderedDict.popitem(last=False) 弹出最早（最少使用）的条目
-        file_id, entry = self._lru.popitem(last=False)
-        # 删除磁盘文件
-        entry.disk_path.unlink(missing_ok=True)
-        meta_path = entry.disk_path.with_suffix(".meta")
-        meta_path.unlink(missing_ok=True)
-        self._total_bytes -= entry.size
-```
+### 3.5 writebuf.py — 写缓冲 + 异步上传
 
-#### 原子写入
-
-```python
-def _write_content(self, path: Path, content: bytes) -> None:
-    """原子写入文件内容。"""
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_bytes(content)
-    tmp_path.rename(path)  # 原子操作
-```
-
-### 3.5 writebuf.py — 写缓冲
-
-#### 接口
-
-```python
-class WriteBuffer:
-    def __init__(self, client: DriveKitClient, buffer_dir: Path, drain_interval: float = 5.0) -> None:
-        """初始化写缓冲。
-        - 创建 buffer_dir（如不存在）
-        - 启动时扫描 .buf 文件，恢复 pending writes
-        """
-
-    def enqueue(self, file_id: str, path: str, content: bytes, sha256: str) -> None:
-        """将写入加入队列。
-        1. 创建 PendingWrite
-        2. 内容写入 buffer_dir/{file_id}.buf（crash safety）
-        3. 添加到内存队列
-        """
-
-    def start_drain(self) -> None:
-        """启动后台 drain 线程。"""
-
-    def stop_drain(self) -> None:
-        """停止后台 drain 线程。
-        等待当前上传完成。"""
-
-    def flush_all(self, timeout: float = 120.0) -> FlushResult:
-        """同步排空所有 pending writes。
-        在 pre-destroy 中调用。
-        阻塞直到全部完成或超时。"""
-
-    def get_pending(self, file_id: str) -> PendingWrite | None:
-        """获取指定文件的 pending write。"""
-
-    @property
-    def pending_count(self) -> int:
-        """待上传文件数。"""
-
-    @property
-    def has_pending(self) -> bool:
-        """是否有待上传文件。"""
-
-@dataclass(frozen=True)
-class FlushResult:
-    total: int
-    succeeded: int
-    failed: int
-    errors: list[str]
-```
-
-#### 后台 drain 线程
-
-```python
-def _drain_loop(self) -> None:
-    """后台线程主循环。"""
-    while not self._stop_event.is_set():
-        self._stop_event.wait(self._drain_interval)
-        if self._stop_event.is_set():
-            break
-        self._drain_one_batch()
-
-def _drain_one_batch(self) -> None:
-    """排空一批 pending writes。"""
-    pending = [w for w in self._queue.values() if w.status == "pending"]
-    for write in pending:
-        if self._stop_event.is_set():
-            break
-        self._upload_one(write)
-
-def _upload_one(self, write: PendingWrite) -> bool:
-    """上传单个文件。"""
-    try:
-        write.status = "uploading"
-        if write.file_id:  # 更新已有文件
-            self._client.update_file(write.file_id, write.content)
-        else:  # 新建文件
-            result = self._client.create_file(
-                filename=Path(write.path).name,
-                content=write.content,
-                parent_folder=self._get_parent_id(write.path),
-            )
-            write.file_id = result["id"]
-        # 上传成功，删除 .buf 文件
-        self._remove_buf_file(write)
-        del self._queue[write.file_id]
-        return True
-    except DriveKitError:
-        write.retry_count += 1
-        if write.retry_count >= self._max_retries:
-            write.status = "failed"
-        else:
-            write.status = "pending"  # 下次重试
-        return False
-```
-
-#### flush_all 流程
+**数据流**:
 
 ```
-flush_all(timeout=120)
-    │
-    ├─ 1. 停止后台 drain 线程
-    │
-    ├─ 2. 获取所有 pending writes
-    │
-    ├─ 3. 逐个同步上传
-    │     ├─ 成功 → 删除 .buf，计数 succeeded
-    │     ├─ 失败 → 重试最多 max_retries 次
-    │     └─ 超时 → 记录错误，计数 failed
-    │
-    └─ 4. 返回 FlushResult(total, succeeded, failed, errors)
+FUSE.flush()
+  └── enqueue(file_id, path, content, sha256)
+        ├── .buf 文件写入（crash safety）
+        ├── .meta 文件写入
+        └── 加入内存队列
+
+drain 线程（每 drain_interval 秒）
+  └── 遍历队列
+        ├── status == "pending" → 上传
+        │   ├── file_id 存在 → client.update_file()
+        │   └── file_id 为空 → client.create_file()
+        ├── 成功 → 删除 .buf/.meta，移出队列
+        └── 失败 → retry_count++，超过 max_retries 则标记 "failed"
+
+pre_destroy()
+  └── flush_all(timeout)
+        └── stop_drain → 同步上传全部 pending → 返回 FlushResult
 ```
+
+**单写者保证**: 同一 file_id 只允许一个活跃写入，重复写入抛出 `WriteBufferError`。
 
 ### 3.6 fuse.py — FUSE 操作
 
-#### 接口
+**核心设计**: 所有 `getattr`/`readdir` 调用前先 `ensure_loaded`，保证所需元数据已加载。
 
 ```python
-class ClawFUSE(logging.WarningsModule):
-    """FUSE 文件系统操作。"""
+def getattr(self, path, fh=None):
+    if path == "/":
+        return _dir_stat()
+    parent = PurePosixPath(path).parent
+    self._dirtree.ensure_loaded(str(parent))   # ← 懒加载
+    meta = self._dirtree.resolve(path)
+    if meta is None:
+        raise FuseOSError(ENOENT)
+    return _dir_stat() if meta.is_dir else _file_stat(meta.size)
 
-    def __init__(
-        self,
-        client: DriveKitClient,
-        dirtree: DirTree,
-        cache: ContentCache,
-        writebuf: WriteBuffer,
-        config: Config,
-    ) -> None: ...
-
-    # ── 文件操作 ──
-
-    def getattr(self, path: str, fh: int | None = None) -> dict:
-        """获取文件/目录属性。
-        返回 FuseStat dict（st_mode, st_size, st_nlink, st_uid, st_gid, st_mtime, st_atime, st_ctime）。
-        """
-
-    def readdir(self, path: str, fh: int) -> list[str]:
-        """列出目录内容。
-        返回 [".", ".."] + 子项名称列表。
-        """
-
-    def open(self, path: str, flags: int) -> int:
-        """打开文件。
-        - 分配文件句柄（_next_fh）
-        - 注册到 _fh_map[fh] = file_id
-        - 对于写模式，初始化 _content_map[fh] = b""
-        """
-
-    def read(self, path: str, size: int, offset: int, fh: int) -> bytes:
-        """读取文件内容。
-        1. 查找 file_id
-        2. 如果有内存缓冲（写入中）→ 从缓冲返回
-        3. 查缓存 → 命中返回
-        4. 下载 → 缓存 → 返回
-        """
-
-    def write(self, path: str, data: bytes, offset: int, fh: int) -> int:
-        """写入文件内容。
-        1. 扩展/修改内存缓冲
-        2. 标记为脏
-        3. 返回 len(data)
-        """
-
-    def create(self, path: str, mode: int) -> int:
-        """创建新文件。
-        1. 解析父目录 + 文件名
-        2. client.create_file(filename, b"")
-        3. dirtree.add_entry(path, meta)
-        4. 分配 fh
-        """
-
-    def flush(self, path: str, fh: int) -> None:
-        """刷新文件。
-        如果 fh 是脏的，enqueue 到 WriteBuffer。
-        """
-
-    def release(self, path: str, fh: int) -> None:
-        """关闭文件。
-        清理 _fh_map, _content_map, _dirty。
-        """
-
-    def unlink(self, path: str) -> None:
-        """删除文件。
-        1. client.delete_file(file_id)
-        2. cache.invalidate(file_id)
-        3. dirtree.remove_entry(path)
-        """
-
-    def truncate(self, path: str, length: int, fh: int | None = None) -> None:
-        """截断文件。"""
-
-    # ── 目录操作 ──
-
-    def mkdir(self, path: str, mode: int) -> None:
-        """创建目录。
-        1. client.create_folder(name, parent)
-        2. dirtree.add_entry(path, meta)
-        """
-
-    def rmdir(self, path: str) -> None:
-        """删除空目录。
-        1. client.delete_file(folder_id)
-        2. dirtree.remove_entry(path)
-        """
-
-    def rename(self, old_path: str, new_path: str) -> None:
-        """重命名/移动。
-        1. client.update_metadata(file_id, fileName=new_name, parentFolder=[new_parent])
-        2. dirtree.move_entry(old_path, new_path)
-        """
-
-    # ── 生命周期 ──
-
-    def destroy(self, private_data: int) -> None:
-        """FUSE 卸载回调。同步排空所有脏数据。"""
-
-    # ── no-op 操作 ──
-
-    def chmod(self, path: str, mode: int) -> None: ...
-    def chown(self, path: str, uid: int, gid: int) -> None: ...
-    def utimens(self, path: str, times: tuple | None = None) -> None: ...
-    def access(self, path: str, amode: int) -> None: ...
-    def statfs(self, path: str) -> dict: ...
-
-    # ── 挂载入口 ──
-
-    def mount(self, mountpoint: str, foreground: bool = False) -> None:
-        """挂载 FUSE 文件系统。"""
+def readdir(self, path, fh):
+    self._dirtree.ensure_loaded(path)           # ← 懒加载
+    return [".", ".."] + self._dirtree.list_dir(path)
 ```
 
-#### 内部状态
+**写入缓冲**: 使用 `bytearray` 而非 `bytes`，切片赋值 `buf[offset:offset+len] = data` 避免大文件 O(n²) 拷贝。
+
+**三级读取查找**: FUSE.read → 写入缓冲 → Cache → download。
 
 ```python
-_fh_map: dict[int, str]          # fh → file_id
-_content_map: dict[int, bytes]   # fh → 内存内容缓冲（写入中）
-_dirty: set[int]                 # 有未写入数据的文件句柄
-_next_fh: int = 1                # 文件句柄计数器
+def read(self, path, size, offset, fh):
+    file_id = self._fh_map[fh]
+    if fh in self._content_map:                 # 1. 写入中的缓冲
+        return self._content_map[fh][offset:offset+size]
+    content = self._cache.get(file_id)          # 2. 磁盘缓存
+    if content is None:
+        content = self._client.download_file(file_id)  # 3. API 下载
+        self._cache.put(file_id, path, content, sha256)
+    return content[offset:offset+size]
 ```
 
-### 3.7 lifecycle.py — 生命周期管理
+**flush 语义**: 脏数据同时写入 WriteBuffer（异步上传）和 Cache（后续读可见）。
 
-#### 接口
+**文件句柄管理**:
+
+| 状态 | 类型 | 说明 |
+|------|------|------|
+| `_fh_map` | `dict[int, str]` | fh → file_id |
+| `_content_map` | `dict[int, bytearray]` | fh → 写入缓冲（仅写入模式） |
+| `_dirty` | `set[int]` | 有未写入数据的 fh |
+
+### 3.7 lifecycle.py — 生命周期编排
+
+**pre_start() 编排**:
+
+```
+1. ensure_dirs()
+2. TokenManager 创建
+3. DriveKitClient 创建
+4. _resolve_root_folder()
+   ├─ "applicationData" → _discover_application_data_root()
+   ├─ 文件夹名称 → discover root → list_files 查找
+   └─ 文件夹 ID → 直接使用
+5. DirTree(client, root_folder)
+6. 启动后台 BFS 线程（daemon，不阻塞）
+7. ContentCache(cache_dir, max_bytes, max_files)
+8. WriteBuffer(client, buffer_dir, ...)
+9. writebuf.start_drain()
+→ 返回 MountResult
+```
+
+**_discover_application_data_root()**:
 
 ```python
-@dataclass(frozen=True)
-class MountResult:
-    success: bool
-    mount_point: str
-    file_count: int
-    load_time_seconds: float
-    error: str = ""
-
-@dataclass(frozen=True)
-class SyncResult:
-    files_synced: int
-    files_failed: int
-    errors: list[str]
-    sync_time_seconds: float
-
-@dataclass(frozen=True)
-class StatusReport:
-    mounted: bool
-    mount_point: str
-    file_count: int
-    cache_entries: int
-    cache_bytes: int
-    pending_writes: int
-    uptime_seconds: float
-
-class LifecycleManager:
-    def __init__(self, config: Config) -> None:
-        """初始化所有组件（不启动）。"""
-
-    def pre_start(self) -> MountResult:
-        """容器启动前调用。组装并启动所有组件。"""
-
-    def pre_destroy(self, timeout: float = 120.0) -> SyncResult:
-        """容器销毁前调用。同步所有写入，卸载 FUSE。"""
-
-    def status(self) -> StatusReport:
-        """当前状态。"""
-
-    @property
-    def is_mounted(self) -> bool: ...
+result = client.list_files(parent_folder="applicationData", page_size=10)
+# queryParam='applicationData' in parentFolder → 列出根级文件
+# 根级文件的 parentField 包含真实根 ID
+parents = extract_parent_ids(result["files"])
+return parents.pop() if parents else "applicationData"  # 回退
 ```
 
 ### 3.8 mount.py — CLI 入口
 
-```python
-def main() -> None:
-    """CLI 入口点。
-
-    1. 解析命令行参数（--mount-point, --token-file, --foreground 等）
-    2. 从环境变量 + CLI 参数创建 Config
-    3. lifecycle = LifecycleManager(config)
-    4. result = lifecycle.pre_start()
-    5. 注册信号处理：SIGTERM → lifecycle.pre_destroy() → sys.exit()
-    6. 等待直到卸载
-    """
+```bash
+clawfuse --config clawfuse.json    # JSON 配置（推荐）
+clawfuse                            # 环境变量（传统模式）
 ```
 
-## 4. 核心流程
+信号处理: SIGTERM → lifecycle.pre_destroy() → sys.exit(0)。
 
-### 4.1 启动挂载流程
+## 4. 时序图
 
-```
-LifecycleManager.pre_start()
-    │
-    ├─ [0-50ms]   1. 创建 Config
-    │               验证环境变量
-    │               创建 cache_dir, buffer_dir
-    │
-    ├─ [50-200ms]  2. 创建 TokenManager
-    │               读取 token 文件
-    │               验证 token 非空
-    │
-    ├─ [200ms-3s]  3. 创建 DirTree + refresh()
-    │               分页拉取 Drive Kit 文件列表
-    │               构建路径树
-    │               N 文件 ≈ ceil(N/200) 页 × ~300ms/页
-    │
-    ├─ [3-3.1s]    4. 创建 ContentCache
-    │               扫描 cache_dir 重建 LRU 索引
-    │               恢复上次缓存
-    │
-    ├─ [3.1-3.2s]  5. 创建 WriteBuffer
-    │               扫描 buffer_dir 恢复 pending writes
-    │
-    ├─ [3.2-3.5s]  6. 创建 ClawFUSE + mount()
-    │               FUSE 线程启动
-    │
-    ├─ [3.5-3.6s]  7. WriteBuffer.start_drain()
-    │               后台线程启动
-    │
-    └─ 返回 MountResult(success=True, file_count=N, load_time_seconds=~3s)
-```
-
-### 4.2 Read 流程
+### 4.1 启动到 Agent 首次读取
 
 ```
-Agent: fd = open("/data/report.csv", O_RDONLY)
-    │
-    ▼ FUSE.open()
-    │  dirtree.resolve("/data/report.csv") → FileMeta(id="abc123", ...)
-    │  分配 fh=1, _fh_map[1]="abc123"
-    │  返回 fh=1
-    │
-Agent: read(fd, buf, 4096)
-    │
-    ▼ FUSE.read(path="/data/report.csv", size=4096, offset=0, fh=1)
-    │  file_id = _fh_map[1] = "abc123"
-    │
-    │  1. 检查 _content_map → 没有（非写入模式）
-    │  2. cache.get("abc123")
-    │     ├─ 命中 → content = 缓存 bytes
-    │     └─ 未命中 → content = client.download("abc123")
-    │                 → cache.put("abc123", path, content, sha256)
-    │  3. 返回 content[0:4096]
-    │
-Agent: close(fd)
-    │
-    ▼ FUSE.release(path, fh=1)
-    │  清理 _fh_map[1], 无脏数据
+编排器        Lifecycle      DirTree(bg)     FUSE          Agent
+  │              │               │             │              │
+  │──create──────▶│               │             │              │
+  │              │──init all─────▶│             │              │
+  │              │──bg thread────▶│             │              │
+  │              │──mount──────────────────────▶│              │
+  │              │◀──ready───────│             │              │
+  │              │                             │◀──ls /drive/─│
+  │              │                             │──getattr("/")─│
+  │              │                             │──ensure_loaded("/")
+  │              │◀──load_dir(root)────────────│              │
+  │              │                             │──readdir("/")─│
+  │              │                             │──response─────│──────────────▶│
+  │              │                             │◀──read file───│
+  │              │◀──download + cache──────────│              │
+  │              │                             │──data───────────────────────▶│
+  │              │               │             │              │
+  │              │   ─ ─ ─ BFS loading ─ ─ ─ ▶│              │
+  │              │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ▶│              │
 ```
 
-### 4.3 Write 流程
+### 4.2 Agent 写入到持久化
 
 ```
-Agent: fd = open("/data/output.json", O_WRONLY|O_CREAT)
-    │
-    ▼ FUSE.create(path="/data/output.json", mode=0o644)
-    │  parent = dirtree.resolve("/data") → FileMeta(id="folder123", is_dir=True)
-    │  result = client.create_file("output.json", b"", parent="folder123")
-    │  meta = FileMeta(id="new123", name="output.json", ...)
-    │  dirtree.add_entry("/data/output.json", meta)
-    │  _fh_map[2] = "new123", _content_map[2] = b""
-    │  返回 fh=2
-    │
-Agent: write(fd, '{"result": 42}', 14)
-    │
-    ▼ FUSE.write(path, data=b'{"result": 42}', offset=0, fh=2)
-    │  _content_map[2] = b'{"result": 42}'
-    │  _dirty.add(2)
-    │  返回 14
-    │
-Agent: close(fd)
-    │
-    ▼ FUSE.flush(path, fh=2)
-    │  fh=2 is dirty → writebuf.enqueue("new123", path, content, sha256)
-    │  → .buf 文件写入磁盘
-    │
-    ▼ FUSE.release(path, fh=2)
-    │  清理 _fh_map, _content_map, _dirty
-    │
-    ▼ [5秒后] 后台 drain 线程
-    │  client.update_file("new123", content)
-    │  成功 → 删除 .buf 文件
+Agent          FUSE           WriteBuffer       drain          Drive Kit
+  │              │               │               │               │
+  │──open(W)────▶│               │               │               │
+  │──write──────▶│ buf[offset:]  │               │               │
+  │──close──────▶│               │               │               │
+  │              │──flush────────▶│               │               │
+  │              │  enqueue()    │               │               │
+  │              │  write .buf   │               │               │
+  │              │  cache.put()  │               │               │
+  │◀─────────────│               │               │               │
+  │  (< 1ms)     │               │               │               │
+  │              │               │               │               │
+  │              │               │  (5s later)   │               │
+  │              │               │──drain batch──▶│               │
+  │              │               │               │──update_file──▶│
+  │              │               │               │◀──200 OK──────│
+  │              │               │               │──delete .buf──│
+  │              │               │               │               │
 ```
 
-### 4.4 Pre-destroy 同步流程
+### 4.3 容器销毁
 
 ```
-SIGTERM 信号 或 lifecycle.pre_destroy() 调用
-    │
-    ▼ LifecycleManager.pre_destroy(timeout=120)
-    │
-    ├─ 1. writebuf.stop_drain()
-    │     等待后台线程停止
-    │
-    ├─ 2. result = writebuf.flush_all(timeout * 0.8)
-    │     逐个同步上传所有 pending writes
-    │     ┌─ 上传成功 → 删除 .buf，succeeded++
-    │     ├─ 上传失败 → 重试 3 次
-    │     └─ 全部失败 → 保留 .buf，failed++
-    │
-    ├─ 3. 如果有失败的 → 重试一次
-    │
-    ├─ 4. 卸载 FUSE
-    │
-    └─ 返回 SyncResult(files_synced=N, files_failed=0, ...)
+编排器        Lifecycle       WriteBuffer      Drive Kit
+  │              │               │               │
+  │──SIGTERM────▶│               │               │
+  │              │──flush_all───▶│               │
+  │              │               │──upload each──▶│
+  │              │               │◀──200─────────│
+  │              │               │──delete .buf──│
+  │              │◀──result──────│               │
+  │◀──exit───────│               │               │
 ```
 
-## 5. 错误处理策略
+## 5. 错误处理矩阵
 
-| 错误场景 | 处理方式 |
-|---------|---------|
-| Token 文件不存在 | 启动失败，ConfigError |
-| Token 无效（401） | 重新读取 token 文件 → 重试一次 → 仍失败则 TokenError |
-| Drive Kit API 5xx | 重试 3 次（指数退避）→ 仍失败则 DriveKitError |
-| Drive Kit API 4xx（非 401） | 记录错误，返回 EIO（读）或缓存失败（写） |
-| 网络超时 | 读取返回 EIO；写入缓存在本地等待 drain |
-| 缓存磁盘满 | LRU 淘汰至最低 → 仍满则返回 ENOSPC |
-| .buf 文件损坏 | 跳过，记录警告 |
-| FUSE getattr 路径不存在 | 返回 -ENOENT |
-| FUSE readdir 路径不存在 | 返回 -ENOENT |
+| 错误 | 来源 | 检测方式 | 处理 |
+|------|------|----------|------|
+| Token 文件缺失 | Config | 启动验证 | ConfigError，启动失败 |
+| Token 无效 | Drive Kit | 401 响应 | force_reread → 重试 → TokenError |
+| API 5xx | Drive Kit | status_code | drain 重试；读返回 EIO |
+| API 4xx（非 401）| Drive Kit | status_code | 记录日志；返回 EIO/保留 .buf |
+| 网络超时 | HTTP | timeout | 读返回 EIO；写缓存在本地 |
+| 缓存磁盘满 | Cache | 大小检查 | LRU 淘汰 → ENOSPC |
+| .buf 文件损坏 | WriteBuffer | JSON 解析 | 跳过，记录警告 |
+| 路径不存在 | DirTree | resolve=None | ENOENT |
+| 后台加载失败 | DirTree | exception | warn 日志；ensure_loaded 独立路径 |
+| 空容器 | Lifecycle | list 返回空 | 回退 "applicationData" |
+| 文件夹名称不存在 | Lifecycle | 遍历无匹配 | MountError + 可用列表 |
 
-## 6. 性能关键路径分析
+## 6. 测试覆盖
 
-### 6.1 启动性能
+共 **165** 个测试，覆盖所有模块:
 
-瓶颈在 Drive Kit list API 分页：
+| 测试文件 | 覆盖内容 | 关键场景 |
+|---------|---------|---------|
+| test_config | 配置验证、环境变量、JSON、冻结 | 边界值、缺失字段 |
+| test_token | 双模式、缓存重读、401 | 过期/空文件 |
+| test_client | queryParam、分页、multipart、401 | API 交互正确性 |
+| test_dirtree | 路径解析、增删改、hidden file | parentField 兼容 |
+| test_cache | LRU 淘汰、持久化恢复、并发 | 超限淘汰正确性 |
+| test_writebuf | enqueue、drain、flush_all、重试 | 单写者冲突 |
+| test_fuse | 全部 POSIX 操作 | ensure_loaded 前置 |
+| test_lazy_load | load_dir、ensure_loaded、bg_load、并发 | 18 个专项测试 |
+| test_lifecycle | 根发现、文件夹解析、状态报告 | 三种 cloud_folder 模式 |
+| test_perf | 基准测试 | 操作延迟 |
+| test_real_perf | 真实 API（mark.realapi） | 端到端验证 |
 
-| 文件数 | API 页数（pageSize=200） | 预估耗时 |
-|--------|-------------------------|---------|
-| 200 | 1 | ~0.3s |
-| 1000 | 5 | ~1.5s |
-| 5000 | 25 | ~7.5s |
-| 10000 | 50 | ~15s |
+**并发安全测试**: 同一目录并发 load_dir、ensure_loaded 与 background_full_load 并发、Condition wait/notify 正确性。
 
-**优化空间**：
-- 使用 `queryParam` 过滤不需要的文件类型
-- 并行请求不同子文件夹（如果 API 允许）
-- 增量刷新（仅同步变化部分）— 未来优化
-
-### 6.2 读取性能
-
-| 场景 | 延迟来源 | 预估 |
-|------|---------|------|
-| 缓存命中 | 磁盘 I/O | <10ms |
-| 缓存未命中（小文件 <1MB） | Drive Kit API + 网络传输 | 100-500ms |
-| 缓存未命中（大文件 100MB） | Drive Kit API + 网络传输 | 1-10s（取决于带宽） |
-
-### 6.3 写入性能
-
-| 操作 | 延迟 |
-|------|------|
-| FUSE.write()（内存缓冲） | <1ms |
-| FUSE.flush()（enqueue + 磁盘写入） | <5ms |
-| 实际上传（drain 线程，异步） | 不影响 Agent |
-
-### 6.4 内存占用
-
-| 组件 | 内存占用 |
-|------|---------|
-| DirTree（1000 文件） | ~200KB（每个 FileMeta ~200 bytes） |
-| Cache 索引 | 忽略不计（OrderedDict 引用） |
-| FUSE 文件句柄 | 每个 <1KB |
-| 文件内容缓冲 | 仅写入中的文件，读后释放 |
-
-总内存占用（不含缓存文件内容）：约 1-5MB。文件内容走磁盘缓存，不占内存。
+单元测试使用 mock DriveKitClient，不调用真实 API。

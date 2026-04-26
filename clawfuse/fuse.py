@@ -26,8 +26,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_UID = os.getuid() if hasattr(os, "getuid") else 0
 _DEFAULT_GID = os.getgid() if hasattr(os, "getgid") else 0
 
+# Import Operations base class (fusepy). Not installed on Windows dev machines,
+# but always available in the container environment.
+try:
+    from fuse import Operations as _FuseOperations
+except ImportError:
+    _FuseOperations = object  # type: ignore[misc,assignment]
 
-class ClawFUSE:
+
+class ClawFUSE(_FuseOperations):  # type: ignore[misc]
     """FUSE filesystem operations backed by Drive Kit."""
 
     def __init__(
@@ -347,7 +354,14 @@ class ClawFUSE:
                 self.flush(path, fh)
 
     def mount(self, mountpoint: str, foreground: bool = False) -> None:
-        """Mount the FUSE filesystem."""
+        """Mount the FUSE filesystem.
+
+        Always uses foreground=True internally. fusepy's own daemonization
+        (foreground=False) calls os.fork() which kills all background threads
+        (BFS loader, writebuf drain), leaving _loading set poisoned and causing
+        deadlock on the first readdir. Background mode should be achieved via
+        nohup/systemd instead.
+        """
         try:
             from fuse import FUSE
         except ImportError:
@@ -356,7 +370,7 @@ class ClawFUSE:
             raise MountError("fusepy not installed. Run: pip install clawfuse[fuse]")
 
         logger.info("Mounting ClawFUSE at %s", mountpoint)
-        FUSE(self, mountpoint, foreground=foreground, ro=False)
+        FUSE(self, mountpoint, foreground=True, ro=False, allow_other=True)
 
     # ── Helpers ──
 
