@@ -13,7 +13,7 @@
   "drain_max_retries": 3,
 
   "tree_refresh_ttl": 10.0,
-  "list_page_size": 200,
+  "list_page_size": 100,
 
   "http_timeout": 30,
   "log_level": "INFO"

@@ -52,7 +52,7 @@ def config(tmp_path: Path, token_file: Path) -> Config:
         drain_interval=1.0,
         drain_max_retries=3,
         tree_refresh_ttl=3600,  # Long TTL for tests
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=10,
         log_level="DEBUG",
     )
@@ -74,7 +74,7 @@ def config_with_string_token(tmp_path: Path) -> Config:
         drain_interval=1.0,
         drain_max_retries=3,
         tree_refresh_ttl=3600,
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=10,
         log_level="DEBUG",
     )

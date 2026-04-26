@@ -158,7 +158,7 @@ def test_frozen_dataclass(tmp_path: Path) -> None:
         drain_interval=5.0,
         drain_max_retries=3,
         tree_refresh_ttl=10.0,
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=30,
         log_level="INFO",
     )
@@ -182,7 +182,7 @@ def test_validate_success(tmp_path: Path) -> None:
         drain_interval=5.0,
         drain_max_retries=3,
         tree_refresh_ttl=10.0,
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=30,
         log_level="INFO",
     )
@@ -202,7 +202,7 @@ def test_validate_string_token(tmp_path: Path) -> None:
         drain_interval=5.0,
         drain_max_retries=3,
         tree_refresh_ttl=10.0,
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=30,
         log_level="INFO",
     )
@@ -223,7 +223,7 @@ def test_validate_no_token(tmp_path: Path) -> None:
         drain_interval=5.0,
         drain_max_retries=3,
         tree_refresh_ttl=10.0,
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=30,
         log_level="INFO",
     )
@@ -244,7 +244,7 @@ def test_validate_zero_cache(tmp_path: Path) -> None:
         drain_interval=5.0,
         drain_max_retries=3,
         tree_refresh_ttl=10.0,
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=30,
         log_level="INFO",
     )
@@ -268,7 +268,7 @@ def test_ensure_dirs(tmp_path: Path) -> None:
         drain_interval=5.0,
         drain_max_retries=3,
         tree_refresh_ttl=10.0,
-        list_page_size=200,
+        list_page_size=100,
         http_timeout=30,
         log_level="INFO",
     )

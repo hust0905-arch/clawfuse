@@ -89,7 +89,7 @@ def test_load_dir_nested(mock_client: MagicMock) -> None:
     tree.load_dir("root")
     assert tree.resolve("/subdir") is not None
     assert tree.resolve("/top.txt") is not None
-    # nested.txt not loaded yet
+    # nested.txt not loaded yet (mock only returns direct children)
     assert tree.resolve("/subdir/nested.txt") is None
 
     tree.load_dir("dir1")

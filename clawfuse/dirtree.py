@@ -314,16 +314,24 @@ class DirTree:
     # ── Internal ──
 
     def _load_dir_from_api(self, dir_id: str) -> None:
-        """Call list_files API for dir_id, merge results into indexes."""
+        """Call list_files API for dir_id, merge results into indexes.
+
+        Uses queryParam='{dir_id}' in parentFolder to list only direct
+        children of the requested directory.
+        """
         result = self._client.list_files(parent_folder=dir_id)
         files = result.get("files", [])
 
         # Handle pagination
         cursor = result.get("nextCursor")
-        while cursor:
+        while cursor and files:
             page = self._client.list_files(parent_folder=dir_id, cursor=cursor)
-            files.extend(page.get("files", []))
-            cursor = page.get("nextCursor")
+            new_files = page.get("files", [])
+            new_cursor = page.get("nextCursor")
+            if not new_files or new_cursor == cursor:
+                break
+            files.extend(new_files)
+            cursor = new_cursor
 
         # Build path cache for resolving parent chains
         path_cache: dict[str, str] = {}
@@ -345,7 +353,7 @@ class DirTree:
                     continue
 
                 parents = item.get("parentFolder", [])
-                parent_id = parents[0]["id"] if parents else ""
+                parent_id = (parents[0]["id"] if isinstance(parents[0], dict) else parents[0]) if parents else ""
 
                 # Resolve full path
                 path = self._resolve_path_for(item_id, parent_id, name, path_cache)
@@ -367,6 +375,7 @@ class DirTree:
                     self._children_map[parent_id] = []
                 self._children_map[parent_id].append(meta)
 
+            # Mark the requested directory as loaded
             self._loaded_dirs.add(dir_id)
 
     def _resolve_path_for(
@@ -438,7 +447,7 @@ class DirTree:
                 mime = raw.get("mimeType", "")
                 is_dir = mime == FOLDER_MIME
                 parents = raw.get("parentFolder", [])
-                parent_id = parents[0]["id"] if parents else ""
+                parent_id = (parents[0]["id"] if isinstance(parents[0], dict) else parents[0]) if parents else ""
 
                 meta = FileMeta(
                     id=item_id,
@@ -489,7 +498,7 @@ class DirTree:
             return None
 
         parents = raw.get("parentFolder", [])
-        parent_id = parents[0]["id"] if parents else ""
+        parent_id = (parents[0]["id"] if isinstance(parents[0], dict) else parents[0]) if parents else ""
 
         if not parent_id or parent_id == self._root_folder:
             path = "/" + name

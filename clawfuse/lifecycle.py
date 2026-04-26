@@ -254,17 +254,28 @@ class LifecycleManager:
     def _resolve_root_folder(self, client: DriveKitClient) -> str:
         """Resolve cloud_folder to a Drive Kit folder ID.
 
-        If cloud_folder is already an ID (or 'applicationData'), return as-is.
-        If it's a folder name, look it up in the root directory.
+        Three cases:
+        1. 'applicationData' — discover the real root folder ID from the API.
+           'applicationData' is a container name, not a parentFolder value.
+           queryParam='applicationData' in parentFolder returns nothing.
+        2. Folder name (short string) — look it up in the root directory.
+        3. Folder ID (20+ chars) — use directly.
         """
+        folder_name = self._config.cloud_folder
+
+        # Case 1: applicationData — discover real root folder ID
+        if folder_name == "applicationData":
+            return self._discover_application_data_root(client)
+
+        # Case 3: already an ID
         if not self._config.needs_folder_resolution:
             return self._config.root_folder
 
-        folder_name = self._config.cloud_folder
+        # Case 2: folder name — resolve by listing root
         logger.info("Resolving cloud_folder '%s' to folder ID...", folder_name)
 
-        # List root directory to find the folder by name
-        result = client.list_files(parent_folder="applicationData", page_size=200)
+        root_id = self._discover_application_data_root(client)
+        result = client.list_files(parent_folder=root_id, page_size=100)
         for f in result.get("files", []):
             if f.get("fileName") == folder_name and f.get("mimeType") == FOLDER_MIME:
                 folder_id = f["id"]
@@ -275,3 +286,35 @@ class LifecycleManager:
             f"Cloud folder '{folder_name}' not found in Drive Kit root. "
             f"Available: {[f.get('fileName') for f in result.get('files', [])]}"
         )
+
+    def _discover_application_data_root(self, client: DriveKitClient) -> str:
+        """Discover the real root folder ID for the applicationData container.
+
+        'applicationData' is a special container name in Drive Kit.
+        queryParam='applicationData' in parentFolder acts as a keyword
+        that lists root-level items of the container. From those items'
+        parentFolder values, we extract the real root folder ID.
+        """
+        logger.info("Discovering applicationData root folder ID...")
+
+        # List root-level items using 'applicationData' as keyword
+        result = client.list_files(parent_folder="applicationData", page_size=10)
+        files = result.get("files", [])
+
+        if files:
+            # All root-level items share the same parentFolder = real root ID
+            parents: set[str] = set()
+            for f in files:
+                pf = f.get("parentFolder", [])
+                for p in pf:
+                    pid = p if isinstance(p, str) else p.get("id", "")
+                    if pid:
+                        parents.add(pid)
+            if parents:
+                real_id = parents.pop()
+                logger.info("applicationData root → %s (%d root items)", real_id, len(files))
+                return real_id
+
+        # Empty container — can't discover root ID
+        logger.warning("applicationData container appears empty")
+        return "applicationData"

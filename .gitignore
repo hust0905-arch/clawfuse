@@ -34,3 +34,11 @@ Thumbs.db
 
 # Local scripts (contain token refresh logic)
 scripts/real_perf_test.py
+scripts/concurrency_test.py
+scripts/real_benchmark.py
+
+# Claude Code
+.claude/
+
+# Benchmark state
+scripts/.bench_*.json

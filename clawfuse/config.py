@@ -26,7 +26,7 @@ DEFAULT_WRITE_BUF_DIR = "/tmp/clawfuse-writes"
 DEFAULT_DRAIN_INTERVAL = 5.0
 DEFAULT_DRAIN_MAX_RETRIES = 3
 DEFAULT_TREE_REFRESH_TTL = 10.0
-DEFAULT_LIST_PAGE_SIZE = 200
+DEFAULT_LIST_PAGE_SIZE = 100
 DEFAULT_HTTP_TIMEOUT = 30
 DEFAULT_LOG_LEVEL = "INFO"
 
@@ -190,8 +190,8 @@ class Config:
             raise ConfigError("cache_max_files must be positive")
         if self.drain_interval <= 0:
             raise ConfigError("drain_interval must be positive")
-        if self.list_page_size <= 0 or self.list_page_size > 500:
-            raise ConfigError("list_page_size must be between 1 and 500")
+        if self.list_page_size <= 0 or self.list_page_size > 100:
+            raise ConfigError("list_page_size must be between 1 and 100")
 
     def ensure_dirs(self) -> None:
         """Create required directories if they don't exist."""

@@ -70,19 +70,23 @@ clawfuse --config clawfuse.json
 | `drain_interval` | float | `5.0` | 后台上传间隔 (秒) |
 | `drain_max_retries` | int | `3` | 上传失败最大重试次数 |
 | `tree_refresh_ttl` | float | `10.0` | 目录树刷新间隔 (秒) |
-| `list_page_size` | int | `200` | Drive Kit 列表接口每页条数 |
+| `list_page_size` | int | `100` | Drive Kit 列表接口每页条数 (1-100) |
 | `http_timeout` | int | `30` | HTTP 请求超时 (秒) |
 | `log_level` | string | `"INFO"` | 日志级别 |
 
-### 云端文件夹
+### cloud_folder 三种模式
 
-- `"applicationData"` — 默认容器数据文件夹，直接使用，无需解析
-- 文件夹名称（如 `"workspace"`）— 启动时通过 `list_files` 解析为 ID
-- 文件夹 ID（20+ 字符的字符串）— 直接使用
+| 值 | 行为 | 示例 |
+|------|------|------|
+| `"applicationData"` | 挂载容器根目录（所有文件） | 默认值 |
+| 文件夹名称 | 启动时在根目录查找同名文件夹，挂载其内容 | `"workspace"` |
+| 文件夹 ID | 直接使用，无需查找 | `"Bom3iAdhu2F_7LBx..."` |
+
+**典型部署场景:** 设置 `cloud_folder: "workspace"` 将容器路径 `/home/sandbox/.openclaw/workspace` 映射到云端 `workspace/` 文件夹，容器销毁后文件保留在云端。
 
 ## 性能
 
-基于真实 Drive Kit API 测量（2026-04-24，中国大陆网络）：
+基于真实 Drive Kit API 测量（2026-04-26，中国大陆网络，1110 目录 + 500 文件）：
 
 | 操作 | 延迟 | 说明 |
 |------|------|------|
@@ -91,10 +95,17 @@ clawfuse --config clawfuse.json
 | `read`（缓存未命中） | **0.8-1.5s** | Drive Kit 下载 + 缓存填充 |
 | `write` | **< 100ms** | 内存缓冲，异步上传 |
 | `create` / `mkdir` | **0.6-1.0s** | Drive Kit API 调用 |
-| 挂载启动 | **< 0.1s** | 仅加载根目录，不阻塞；后台线程并行预加载全部元数据 |
-| 首次访问未加载目录 | **~0.8s/级** | ensure_loaded 逐级加载用户请求路径，后台继续并行加载剩余 |
+| 挂载启动 | **< 0.01s** | 仅初始化组件，后台线程异步加载元数据 |
+| 后台全部加载 (1110 目录) | **~20s** | 8 线程并行 BFS |
+| 首次访问未加载目录 | **~0.8s/级** | ensure_loaded 逐级加载用户请求路径 |
 
-**核心发现:** Drive Kit 单次 API 调用有约 800ms 固定开销，与文件大小无关。缓存命中后读取加速 **3000-4000 倍**。挂载采用懒加载，启动不阻塞，后台 8 线程并行预加载元数据。
+**Drive Kit API 注意事项:**
+
+- 单次 API 调用约 800ms 固定开销，与文件大小无关
+- 列表接口使用 `queryParam='{folderId}' in parentFolder` 过滤（Google Drive 风格语法）
+- 每页最多 100 条（API 限制）
+- 缓存命中后读取加速 **3000-4000 倍**
+- 并行 BFS 加载比串行 BFS 快 **5 倍以上**
 
 ## 项目结构
 
@@ -102,23 +113,33 @@ clawfuse --config clawfuse.json
 clawfuse/
   __init__.py          # 包初始化
   cache.py             # LRU 磁盘缓存 (ContentCache)
-  client.py            # Drive Kit REST API 客户端
+  client.py            # Drive Kit REST API 客户端 (queryParam 过滤)
   config.py            # 配置数据类 (from_env / from_file)
-  dirtree.py           # 内存目录树 (DirTree)
-  exceptions.py        # 自定义异常
+  dirtree.py           # 内存目录树，懒加载 + 后台并行预加载
+  exceptions.py        # DriveKitError, TokenError, ConfigError, MountError
   fuse.py              # FUSE 操作绑定 (ClawFUSE)
-  lifecycle.py         # 生命周期管理 (pre-start / pre-destroy)
-  mount.py             # CLI 入口
+  lifecycle.py         # 生命周期管理：启动时解析文件夹 + 后台加载
+  mount.py             # CLI 入口 (clawfuse --config)
   token.py             # 令牌管理器 (文件模式 / 字符串模式)
   writebuf.py          # 写缓冲 + 异步回传
 tests/
   conftest.py          # 共享测试夹具
-  test_lazy_load.py    # 懒加载 + 并发安全测试
-  test_*.py            # 单元测试 + 性能测试
-docs/
-  ClawFUSE-架构设计说明书.md
-  ClawFUSE-详细设计说明书.md
-  ClawFUSE-性能测试报告.md
+  test_cache.py        # 缓存测试
+  test_client.py       # API 客户端测试
+  test_config.py       # 配置测试
+  test_dirtree.py      # 目录树测试
+  test_fuse.py         # FUSE 操作测试
+  test_lazy_load.py    # 懒加载 + 并发安全测试 (18 个)
+  test_lifecycle.py    # 生命周期测试
+  test_token.py        # 令牌管理测试
+  test_writebuf.py     # 写缓冲测试
+  test_perf.py         # 性能基准测试
+  test_real_perf.py    # 真实 API 测试 (pytest.mark.realapi)
+scripts/
+  bench_metadata.py    # 元数据加载基准测试 (5^3 目录)
+  bench_large.py       # 大规模压力测试 (10^3 目录)
+pyproject.toml         # 项目配置 (hatchling)
+clawfuse.json.example  # 配置文件模板
 ```
 
 ## 开发
@@ -127,10 +148,7 @@ docs/
 # 安装开发依赖
 pip install -e ".[dev]"
 
-# 运行测试
-pytest tests/
-
-# 跳过真实 API 测试
+# 运行测试 (165 个，跳过真实 API)
 pytest tests/ -k "not realapi"
 
 # 代码检查
@@ -139,6 +157,14 @@ ruff check clawfuse/ tests/
 # 类型检查
 mypy clawfuse/
 ```
+
+## 关键约束
+
+- **令牌只读。** TokenManager 不会写入令牌文件，令牌刷新由外部完成。
+- **每个文件单写入者。** 同一文件的并发写入会抛出 `WriteBufferError`。
+- **Drive Kit API 要求 `containers=applicationData`。** 自动附加。
+- **`applicationData` 是容器名不是文件夹 ID。** 启动时自动发现真实根目录 ID。
+- **配置不可变。** `Config` 是 `@dataclass(frozen=True)`。
 
 ## 许可证
 

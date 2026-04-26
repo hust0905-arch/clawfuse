@@ -209,14 +209,18 @@ class DriveKitClient:
     def list_files(
         self,
         parent_folder: str | None = None,
-        page_size: int = 200,
+        page_size: int = 100,
         fields: str = f"files({DEFAULT_FIELDS}),nextCursor",
         cursor: str | None = None,
     ) -> dict:
-        """List files with pagination. Returns {files: [...], nextCursor: '...'}."""
+        """List files with pagination. Returns {files: [...], nextCursor: '...'}.
+
+        Uses Drive Kit queryParam filter: '{folderId}' in parentFolder.
+        Without parent_folder, lists all files in the container.
+        """
         p = self._params(pageSize=str(page_size), fields=fields)
         if parent_folder:
-            p["parentFolder"] = parent_folder
+            p["queryParam"] = f"'{parent_folder}' in parentFolder"
         if cursor:
             p["pageCursor"] = cursor
 
@@ -234,7 +238,7 @@ class DriveKitClient:
     def list_all_files(
         self,
         root_folder: str = "applicationData",
-        page_size: int = 200,
+        page_size: int = 100,
     ) -> list[dict]:
         """Recursively list all files starting from root_folder.
 
@@ -242,10 +246,12 @@ class DriveKitClient:
         """
         all_items: list[dict] = []
         folders_to_process: list[str] = [root_folder]
+        seen_ids: set[str] = set()
 
         while folders_to_process:
             folder_id = folders_to_process.pop(0)
             cursor: str | None = None
+            prev_cursor: str | None = None
 
             while True:
                 result = self.list_files(
@@ -254,16 +260,28 @@ class DriveKitClient:
                     cursor=cursor,
                 )
                 files = result.get("files", [])
-                all_items.extend(files)
+
+                # Deduplicate items and stop if no new items
+                new_files = []
+                new_ids: set[str] = set()
+                for f in files:
+                    fid = f.get("id", "")
+                    if fid and fid not in seen_ids:
+                        seen_ids.add(fid)
+                        new_files.append(f)
+                        new_ids.add(fid)
+
+                all_items.extend(new_files)
 
                 # Collect sub-folders for BFS
-                for f in files:
+                for f in new_files:
                     if f.get("mimeType") == FOLDER_MIME:
                         folders_to_process.append(f["id"])
 
                 cursor = result.get("nextCursor")
-                if not cursor:
+                if not cursor or cursor == prev_cursor or not new_ids:
                     break
+                prev_cursor = cursor
 
         logger.info("Loaded %d items from Drive Kit (root=%s)", len(all_items), root_folder)
         return all_items
