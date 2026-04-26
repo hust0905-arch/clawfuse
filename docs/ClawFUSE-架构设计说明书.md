@@ -94,7 +94,8 @@ Agent write(path, data, offset)
     ├─ 内存 bytearray 缓冲 (< 1ms)        ← 切片赋值，避免 O(n²)
     │
     ├─ flush → WriteBuffer.enqueue        ← 持久化 .buf 文件
-    │   └─ 同时更新 Cache（后续读可见）
+    │   ├─ 同时更新 Cache（后续读可见）
+    │   └─ 同时更新 DirTree size（getattr 返回正确大小）
     │
     └─ drain 线程异步上传                  ← 不阻塞 Agent
         ├─ 成功 → 删除 .buf

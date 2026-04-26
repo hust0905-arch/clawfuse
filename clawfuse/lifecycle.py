@@ -271,21 +271,35 @@ class LifecycleManager:
         if not self._config.needs_folder_resolution:
             return self._config.root_folder
 
-        # Case 2: folder name — resolve by listing root
+        # Case 2: folder name — resolve by listing root, auto-create if missing
         logger.info("Resolving cloud_folder '%s' to folder ID...", folder_name)
 
         root_id = self._discover_application_data_root(client)
-        result = client.list_files(parent_folder=root_id, page_size=100)
-        for f in result.get("files", []):
-            if f.get("fileName") == folder_name and f.get("mimeType") == FOLDER_MIME:
-                folder_id = f["id"]
-                logger.info("Resolved '%s' → %s", folder_name, folder_id)
-                return folder_id
 
-        raise MountError(
-            f"Cloud folder '{folder_name}' not found in Drive Kit root. "
-            f"Available: {[f.get('fileName') for f in result.get('files', [])]}"
+        if root_id != "applicationData":
+            # Normal path: root discovered, search for named folder
+            result = client.list_files(parent_folder=root_id, page_size=100)
+            for f in result.get("files", []):
+                if f.get("fileName") == folder_name and f.get("mimeType") == FOLDER_MIME:
+                    folder_id = f["id"]
+                    logger.info("Resolved '%s' → %s", folder_name, folder_id)
+                    return folder_id
+
+        # Folder not found (or empty container) — auto-create
+        logger.info(
+            "Cloud folder '%s' not found, auto-creating under applicationData",
+            folder_name,
         )
+        created = client.create_folder(
+            folder_name=folder_name,
+            parent_folder=root_id,
+        )
+        folder_id = created.get("id", "")
+        if not folder_id:
+            raise MountError(f"Failed to auto-create folder '{folder_name}': {created}")
+
+        logger.info("Auto-created folder '%s' → %s", folder_name, folder_id)
+        return folder_id
 
     def _discover_application_data_root(self, client: DriveKitClient) -> str:
         """Discover the real root folder ID for the applicationData container.

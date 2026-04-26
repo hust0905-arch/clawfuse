@@ -242,6 +242,10 @@ def _resolve_path_for(item_id, parent_id, name, cache):
 | `_id_map` | `dict[str, str]` | 文件 ID → 路径（反向查找） |
 | `_children_map` | `dict[str, list[FileMeta]]` | 目录 ID → 子项列表（readdir 查询） |
 
+#### 元数据更新
+
+`FileMeta` 是 `@dataclass(frozen=True)` 不可变。`update_meta(path, **fields)` 使用 `dataclasses.replace()` 创建新实例，替换 `_path_map` 和 `_children_map` 中的引用。主要用于写入后更新文件大小和哈希值。
+
 ### 3.4 cache.py — LRU 磁盘缓存
 
 **磁盘布局**:
@@ -290,6 +294,8 @@ pre_destroy()
 
 ### 3.6 fuse.py — FUSE 操作
 
+**类继承**: `ClawFUSE` 继承自 `fusepy.Operations`。缺少继承会导致 FUSE 内核模块无法分发操作，返回 EINVAL (errno 22)。
+
 **核心设计**: 所有 `getattr`/`readdir` 调用前先 `ensure_loaded`，保证所需元数据已加载。
 
 ```python
@@ -308,15 +314,15 @@ def readdir(self, path, fh):
     return [".", ".."] + self._dirtree.list_dir(path)
 ```
 
-**写入缓冲**: 使用 `bytearray` 而非 `bytes`，切片赋值 `buf[offset:offset+len] = data` 避免大文件 O(n²) 拷贝。
+**写入缓冲**: 使用 `bytearray`（非 `bytes`），切片赋值 `buf[offset:offset+len] = data` 避免大文件 O(n²) 拷贝。`bytes` 不支持切片赋值，会导致写入失败。
 
-**三级读取查找**: FUSE.read → 写入缓冲 → Cache → download。
+**三级读取查找**: FUSE.read → 写入缓冲 → Cache → download。read() 必须返回 `bytes`（非 `bytearray`），否则 `ctypes.memmove` 无法处理导致崩溃。
 
 ```python
 def read(self, path, size, offset, fh):
     file_id = self._fh_map[fh]
     if fh in self._content_map:                 # 1. 写入中的缓冲
-        return self._content_map[fh][offset:offset+size]
+        return bytes(self._content_map[fh][offset:offset+size])  # ← 必须 bytes()
     content = self._cache.get(file_id)          # 2. 磁盘缓存
     if content is None:
         content = self._client.download_file(file_id)  # 3. API 下载
@@ -324,7 +330,32 @@ def read(self, path, size, offset, fh):
     return content[offset:offset+size]
 ```
 
-**flush 语义**: 脏数据同时写入 WriteBuffer（异步上传）和 Cache（后续读可见）。
+**open() 缓存未命中下载**: 以写模式打开文件时，如果缓存中没有已有内容，必须从云端下载，否则覆盖写会丢失原有数据。
+
+```python
+def open(self, path, flags):
+    ...
+    if flags & (os.O_WRONLY | os.O_RDWR):
+        existing = self._cache.get(meta.id)
+        if existing is None:
+            existing = self._client.download_file(meta.id)  # ← 防止数据丢失
+        self._content_map[fh] = bytearray(existing)
+```
+
+**flush 语义**: 脏数据同时写入 WriteBuffer（异步上传）、Cache（后续读可见）和 DirTree（更新文件大小）。flush 后 getattr 返回正确的 size。
+
+```python
+def flush(self, path, fh):
+    if fh in self._dirty:
+        content = bytes(self._content_map.get(fh, b""))
+        self._writebuf.enqueue(file_id, path, content, sha256)
+        self._cache.put(file_id, path, content, sha256)
+        self._dirtree.update_meta(path, size=len(content), sha256=sha256)  # ← 更新 size
+```
+
+**destroy() 刷写**: FUSE 卸载时遍历 `_dirty` 集合，逐个调用 flush 确保所有脏数据已上传。
+
+**mount() 前台模式**: 始终使用 `foreground=True`。fusepy 的 daemonize (`foreground=False`) 会调用 `os.fork()` 杀死所有后台 Python 线程（BFS 加载、drain 线程），导致 `_loading` 集合被锁定、首次 readdir 死锁。需要后台运行时应使用 `nohup` 或 `systemd`。
 
 **文件句柄管理**:
 
@@ -344,7 +375,7 @@ def read(self, path, size, offset, fh):
 3. DriveKitClient 创建
 4. _resolve_root_folder()
    ├─ "applicationData" → _discover_application_data_root()
-   ├─ 文件夹名称 → discover root → list_files 查找
+   ├─ 文件夹名称 → discover root → list_files 查找 → **不存在则自动创建**
    └─ 文件夹 ID → 直接使用
 5. DirTree(client, root_folder)
 6. 启动后台 BFS 线程（daemon，不阻塞）

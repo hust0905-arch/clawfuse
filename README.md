@@ -79,10 +79,10 @@ clawfuse --config clawfuse.json
 | 值 | 行为 | 示例 |
 |------|------|------|
 | `"applicationData"` | 挂载容器根目录（所有文件） | 默认值 |
-| 文件夹名称 | 启动时在根目录查找同名文件夹，挂载其内容 | `"workspace"` |
+| 文件夹名称 | 启动时在根目录查找同名文件夹，**不存在则自动创建** | `"workspace"` |
 | 文件夹 ID | 直接使用，无需查找 | `"Bom3iAdhu2F_7LBx..."` |
 
-**典型部署场景:** 设置 `cloud_folder: "workspace"` 将容器路径 `/home/sandbox/.openclaw/workspace` 映射到云端 `workspace/` 文件夹，容器销毁后文件保留在云端。
+**典型部署场景:** 设置 `cloud_folder: "workspace"` 将容器路径 `/home/sandbox/.openclaw/workspace` 映射到云端 `workspace/` 文件夹，容器销毁后文件保留在云端。如果 `workspace` 文件夹不存在，启动时会自动创建——即使云空间完全清空，ClawFUSE 也能正常挂载。
 
 ## 性能
 

@@ -38,6 +38,7 @@ mypy clawfuse/                   # 类型检查
 - **Drive Kit API 要求 `containers=applicationData`。** `DriveKitClient` 的 `_params()` 方法自动附加此参数。
 - **列表接口使用 queryParam 过滤。** 格式为 `'{folderId}' in parentFolder`。直接传 `parentFolder` 参数会被 API 忽略。
 - **`applicationData` 是容器名不是文件夹 ID。** 启动时通过 `_discover_application_data_root()` 发现真实根目录 ID。文件夹名称（如 `"workspace"`）通过在根目录列表中查找同名文件夹来解析。
+- **cloud_folder 自动创建。** 如果 `cloud_folder` 指定的文件夹（如 `"workspace"`）在云根目录下不存在，lifecycle 会在启动时自动调用 `create_folder` 创建。这意味着即使云空间完全清空，ClawFUSE 也能正常挂载。
 - **Multipart 上传格式。** 创建和更新使用 Drive Kit multipart/form-data（元数据 JSON + 二进制内容）。
 - **配置不可变。** `Config` 是 `@dataclass(frozen=True)`。修改时需创建新的 Config 实例。
 - **所有文件 UTF-8 编码。** 令牌文件、配置文件、源代码均使用 UTF-8。
