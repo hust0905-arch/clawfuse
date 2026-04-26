@@ -247,6 +247,27 @@ class DirTree:
                 self._children_map[meta.parent_id] = []
             self._children_map[meta.parent_id].append(meta)
 
+    def update_meta(self, path: str, **fields: object) -> None:
+        """Replace a FileMeta entry, updating only the given fields.
+
+        Uses dataclasses.replace() to create a new frozen instance.
+        """
+        from dataclasses import replace
+
+        with self._lock:
+            normalized = self._normalize(path)
+            meta = self._path_map.get(normalized)
+            if meta is None:
+                return
+            new_meta = replace(meta, **fields)
+            self._path_map[normalized] = new_meta
+            # Update children_map reference (same id, so just replace in list)
+            children = self._children_map.get(meta.parent_id, [])
+            for i, c in enumerate(children):
+                if c.id == meta.id:
+                    children[i] = new_meta
+                    break
+
     def remove_entry(self, path: str) -> None:
         """Remove an entry by path."""
         with self._lock:

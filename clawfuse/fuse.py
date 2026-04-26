@@ -53,7 +53,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
         # File handle state
         self._fh_map: dict[int, str] = {}  # fh → file_id
-        self._content_map: dict[int, bytes] = {}  # fh → write buffer
+        self._content_map: dict[int, bytearray] = {}  # fh → write buffer
         self._dirty: set[int] = set()
         self._next_fh: int = 1
 
@@ -94,11 +94,13 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         fh = self._alloc_fh()
         self._fh_map[fh] = meta.id
 
-        # For write modes, initialize content buffer
+        # For write modes, initialize content buffer with existing content
         if flags & (os.O_WRONLY | os.O_RDWR):
-            # Try to get existing content from cache
             existing = self._cache.get(meta.id)
-            self._content_map[fh] = existing if existing is not None else b""
+            if existing is None:
+                # Cache miss — download from cloud to avoid data loss
+                existing = self._client.download_file(meta.id)
+            self._content_map[fh] = bytearray(existing)
 
         return fh
 
@@ -111,7 +113,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         # If writing, read from in-memory buffer
         if fh in self._content_map:
             content = self._content_map[fh]
-            return content[offset : offset + size]
+            return bytes(content[offset : offset + size])
 
         # Try cache
         content = self._cache.get(file_id)
@@ -138,7 +140,9 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         if fh not in self._content_map:
             # Initialize buffer with existing content if first write
             file_id = self._fh_map.get(fh, "")
-            existing = self._cache.get(file_id) or b""
+            existing = self._cache.get(file_id)
+            if existing is None:
+                existing = self._client.download_file(file_id)
             self._content_map[fh] = bytearray(existing)
 
         buf = self._content_map[fh]
@@ -202,6 +206,9 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             self._writebuf.enqueue(file_id, path, content, sha256)
             # Also update cache so subsequent reads see the latest content
             self._cache.put(file_id, path, content, sha256)
+            # Update size in dirtree so getattr returns correct size
+            if path:
+                self._dirtree.update_meta(path, size=len(content), sha256=sha256)
             self._dirty.discard(fh)
 
     def release(self, path: str, fh: int) -> None:
@@ -250,6 +257,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
         sha256 = hashlib.sha256(content).hexdigest()
         self._writebuf.enqueue(meta.id, path, content, sha256)
+        self._dirtree.update_meta(path, size=len(content), sha256=sha256)
 
     # ── Directory operations ──
 
@@ -345,13 +353,8 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         """FUSE unmount callback. Flush all dirty data."""
         logger.info("FUSE destroy called — flushing dirty data")
         for fh in list(self._dirty):
-            path = ""
-            for p, f in self._fh_map.items():
-                if f == fh:
-                    path = p
-                    break
-            if path:
-                self.flush(path, fh)
+            if fh in self._fh_map:
+                self.flush("", fh)
 
     def mount(self, mountpoint: str, foreground: bool = False) -> None:
         """Mount the FUSE filesystem.
