@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--root-folder", default=None, help="Drive Kit root folder ID")
     parser.add_argument("--foreground", action="store_true", help="Run in foreground")
     parser.add_argument("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
+    parser.add_argument("--allow-other", action="store_true", help="Allow other users to access the FUSE mount (requires root)")
     args = parser.parse_args()
 
     # Build config: --config file > env vars > CLI overrides
@@ -55,6 +56,11 @@ def main() -> None:
         config = Config(
             **{k: v for k, v in config.__dict__.items() if k != "log_level"},
             log_level=args.log_level,
+        )
+    if args.allow_other:
+        config = Config(
+            **{k: v for k, v in config.__dict__.items() if k != "allow_other"},
+            allow_other=True,
         )
 
     # Setup logging
@@ -107,7 +113,7 @@ def main() -> None:
         from .fuse import ClawFUSE
 
         assert isinstance(fuse_ops, ClawFUSE)
-        fuse_ops.mount(config.mount_point, foreground=args.foreground)
+        fuse_ops.mount(config.mount_point, foreground=args.foreground, allow_other=config.allow_other)
     except ImportError:
         logger.error("fusepy not installed. Install with: pip install clawfuse[fuse]")
         sys.exit(1)

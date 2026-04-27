@@ -356,7 +356,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             if fh in self._fh_map:
                 self.flush("", fh)
 
-    def mount(self, mountpoint: str, foreground: bool = False) -> None:
+    def mount(self, mountpoint: str, foreground: bool = False, allow_other: bool = False) -> None:
         """Mount the FUSE filesystem.
 
         Always uses foreground=True internally. fusepy's own daemonization
@@ -364,6 +364,11 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         (BFS loader, writebuf drain), leaving _loading set poisoned and causing
         deadlock on the first readdir. Background mode should be achieved via
         nohup/systemd instead.
+
+        Args:
+            allow_other: Allow other users to access the mount point.
+                Requires root or 'user_allow_other' in /etc/fuse.conf.
+                Default False for non-root compatibility.
         """
         try:
             from fuse import FUSE
@@ -372,8 +377,8 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
             raise MountError("fusepy not installed. Run: pip install clawfuse[fuse]")
 
-        logger.info("Mounting ClawFUSE at %s", mountpoint)
-        FUSE(self, mountpoint, foreground=True, ro=False, allow_other=True)
+        logger.info("Mounting ClawFUSE at %s (allow_other=%s)", mountpoint, allow_other)
+        FUSE(self, mountpoint, foreground=True, ro=False, allow_other=allow_other)
 
     # ── Helpers ──
 

@@ -101,6 +101,9 @@ class Config:
     # Network
     http_timeout: int = DEFAULT_HTTP_TIMEOUT
 
+    # FUSE
+    allow_other: bool = False
+
     # Logging
     log_level: str = DEFAULT_LOG_LEVEL
 
@@ -148,6 +151,7 @@ class Config:
             list_page_size=data.get("list_page_size", DEFAULT_LIST_PAGE_SIZE),
             http_timeout=data.get("http_timeout", DEFAULT_HTTP_TIMEOUT),
             log_level=data.get("log_level", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL,
+            allow_other=data.get("allow_other", False),
         )
 
     @classmethod
@@ -177,6 +181,7 @@ class Config:
             list_page_size=_env_int("CLAWFUSE_LIST_PAGE_SIZE", DEFAULT_LIST_PAGE_SIZE),
             http_timeout=_env_int("CLAWFUSE_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT),
             log_level=_env("CLAWFUSE_LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL,
+            allow_other=bool(_env("CLAWFUSE_ALLOW_OTHER", "")),
         )
 
     def validate(self) -> None:
