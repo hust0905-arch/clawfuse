@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--foreground", action="store_true", help="Run in foreground")
     parser.add_argument("--log-level", default=None, help="Log level (DEBUG/INFO/WARNING/ERROR)")
     parser.add_argument("--allow-other", action="store_true", help="Allow other users to access the FUSE mount (requires root)")
+    parser.add_argument("--nonempty", action="store_true", help="Allow mounting over a non-empty directory")
     args = parser.parse_args()
 
     # Build config: --config file > env vars > CLI overrides
@@ -61,6 +62,11 @@ def main() -> None:
         config = Config(
             **{k: v for k, v in config.__dict__.items() if k != "allow_other"},
             allow_other=True,
+        )
+    if args.nonempty:
+        config = Config(
+            **{k: v for k, v in config.__dict__.items() if k != "nonempty"},
+            nonempty=True,
         )
 
     # Setup logging
@@ -113,7 +119,7 @@ def main() -> None:
         from .fuse import ClawFUSE
 
         assert isinstance(fuse_ops, ClawFUSE)
-        fuse_ops.mount(config.mount_point, foreground=args.foreground, allow_other=config.allow_other)
+        fuse_ops.mount(config.mount_point, foreground=args.foreground, allow_other=config.allow_other, nonempty=config.nonempty)
     except ImportError:
         logger.error("fusepy not installed. Install with: pip install clawfuse[fuse]")
         sys.exit(1)

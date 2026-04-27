@@ -103,6 +103,7 @@ class Config:
 
     # FUSE
     allow_other: bool = False
+    nonempty: bool = False
 
     # Logging
     log_level: str = DEFAULT_LOG_LEVEL
@@ -152,6 +153,7 @@ class Config:
             http_timeout=data.get("http_timeout", DEFAULT_HTTP_TIMEOUT),
             log_level=data.get("log_level", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL,
             allow_other=data.get("allow_other", False),
+            nonempty=data.get("nonempty", False),
         )
 
     @classmethod
@@ -182,6 +184,7 @@ class Config:
             http_timeout=_env_int("CLAWFUSE_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT),
             log_level=_env("CLAWFUSE_LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL,
             allow_other=bool(_env("CLAWFUSE_ALLOW_OTHER", "")),
+            nonempty=bool(_env("CLAWFUSE_NONEMPTY", "")),
         )
 
     def validate(self) -> None:

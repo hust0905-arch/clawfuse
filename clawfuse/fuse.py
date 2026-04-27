@@ -356,7 +356,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             if fh in self._fh_map:
                 self.flush("", fh)
 
-    def mount(self, mountpoint: str, foreground: bool = False, allow_other: bool = False) -> None:
+    def mount(self, mountpoint: str, foreground: bool = False, allow_other: bool = False, nonempty: bool = False) -> None:
         """Mount the FUSE filesystem.
 
         Always uses foreground=True internally. fusepy's own daemonization
@@ -369,6 +369,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             allow_other: Allow other users to access the mount point.
                 Requires root or 'user_allow_other' in /etc/fuse.conf.
                 Default False for non-root compatibility.
+            nonempty: Allow mounting over a non-empty directory.
         """
         try:
             from fuse import FUSE
@@ -377,8 +378,8 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
             raise MountError("fusepy not installed. Run: pip install clawfuse[fuse]")
 
-        logger.info("Mounting ClawFUSE at %s (allow_other=%s)", mountpoint, allow_other)
-        FUSE(self, mountpoint, foreground=True, ro=False, allow_other=allow_other, nonempty=True)
+        logger.info("Mounting ClawFUSE at %s (allow_other=%s, nonempty=%s)", mountpoint, allow_other, nonempty)
+        FUSE(self, mountpoint, foreground=True, ro=False, allow_other=allow_other, nonempty=nonempty)
 
     # ── Helpers ──
 

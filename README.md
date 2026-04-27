@@ -90,6 +90,7 @@ nohup python -m clawfuse.mount --config clawfuse.json > clawfuse.log 2>&1 &
 | `http_timeout` | int | `30` | HTTP 请求超时 (秒) |
 | `log_level` | string | `"INFO"` | 日志级别 |
 | `allow_other` | bool | `false` | 允许其他用户访问挂载点（需 root 或 `/etc/fuse.conf` 配置 `user_allow_other`） |
+| `nonempty` | bool | `false` | 允许挂载到非空目录（容器 workspace 已有文件时设为 `true`） |
 
 ### cloud_folder 三种模式
 
