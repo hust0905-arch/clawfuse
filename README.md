@@ -60,7 +60,16 @@ pip install -e ".[fuse]"
 ### 3. 挂载
 
 ```bash
+# 方式一：使用 clawfuse 命令（pip 安装后自动生成）
+# 位置：虚拟环境在 .venv/bin/clawfuse，--user 安装在 ~/.local/bin/clawfuse
+# 如果找不到命令，用方式二
 clawfuse --config clawfuse.json
+
+# 方式二：直接用 Python 模块运行（不依赖 PATH）
+python -m clawfuse.mount --config clawfuse.json
+
+# 后台运行
+nohup python -m clawfuse.mount --config clawfuse.json > clawfuse.log 2>&1 &
 ```
 
 ## 配置说明
