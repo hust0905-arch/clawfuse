@@ -35,8 +35,15 @@
 ### 1. 安装
 
 ```bash
+# 克隆仓库
+git clone https://github.com/hust0905-arch/clawfuse.git
+cd clawfuse
+
+# 安装（包含 FUSE 支持）
 pip install -e ".[fuse]"
 ```
+
+> **非 root 用户：** 确保系统安装了 `fuse` 包（提供 `fusermount` 命令）。大多数 Linux 发行版默认已安装。`allow_other` 默认关闭，普通用户可直接挂载。
 
 ### 2. 创建配置文件
 
@@ -73,6 +80,7 @@ clawfuse --config clawfuse.json
 | `list_page_size` | int | `100` | Drive Kit 列表接口每页条数 (1-100) |
 | `http_timeout` | int | `30` | HTTP 请求超时 (秒) |
 | `log_level` | string | `"INFO"` | 日志级别 |
+| `allow_other` | bool | `false` | 允许其他用户访问挂载点（需 root 或 `/etc/fuse.conf` 配置 `user_allow_other`） |
 
 ### cloud_folder 三种模式
 
@@ -160,6 +168,7 @@ mypy clawfuse/
 
 ## 关键约束
 
+- **非 root 可用。** `allow_other` 默认关闭，普通用户可直接挂载到自己的目录。需要其他用户也能访问挂载点时，用 `--allow-other` 或配置 `"allow_other": true`（需 root 权限）。
 - **令牌只读。** TokenManager 不会写入令牌文件，令牌刷新由外部完成。
 - **每个文件单写入者。** 同一文件的并发写入会抛出 `WriteBufferError`。
 - **Drive Kit API 要求 `containers=applicationData`。** 自动附加。
