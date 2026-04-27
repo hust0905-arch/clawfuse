@@ -378,7 +378,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             raise MountError("fusepy not installed. Run: pip install clawfuse[fuse]")
 
         logger.info("Mounting ClawFUSE at %s (allow_other=%s)", mountpoint, allow_other)
-        FUSE(self, mountpoint, foreground=True, ro=False, allow_other=allow_other)
+        FUSE(self, mountpoint, foreground=True, ro=False, allow_other=allow_other, nonempty=True)
 
     # ── Helpers ──
 
