@@ -176,6 +176,76 @@ ruff check clawfuse/ tests/
 mypy clawfuse/
 ```
 
+## 容器部署要求
+
+ClawFUSE 基于 FUSE 内核模块，容器环境需要满足以下条件。
+
+### 前置检查
+
+在容器内按顺序执行，哪一步不过就解决哪一步：
+
+```bash
+# 1. 检查 FUSE 内核模块
+modprobe fuse 2>&1        # 应无报错（或已加载）
+ls -la /dev/fuse           # 应显示字符设备文件
+
+# 2. 检查用户空间工具
+which fusermount           # 应存在
+
+# 3. 检查 Python 版本
+python3 --version          # 需要 3.10+
+
+# 4. 检查网络连通性
+curl -s https://driveapis.cloud.huawei.com.cn/drive/v1/about  # 应有响应
+
+# 5. 检查挂载目录权限
+touch /你的挂载目录/.test && rm /你的挂载目录/.test   # 应成功
+```
+
+### K8s 部署配置
+
+容器需要 FUSE 设备和挂载权限。在 Pod YAML 中添加：
+
+```yaml
+spec:
+  containers:
+  - name: your-container
+    securityContext:
+      capabilities:
+        add: ["SYS_ADMIN"]     # FUSE 挂载必需
+    volumeMounts:
+    - name: fuse
+      mountPath: /dev/fuse
+  volumes:
+  - name: fuse
+    hostPath:
+      path: /dev/fuse
+```
+
+> **注意：** `SYS_ADMIN` 是 FUSE 挂载的最低权限要求。如果安全策略不允许，可尝试 `privileged: true`，或联系平台团队评估。
+
+### 安全容器（Kuasar/Kata）限制
+
+| 容器类型 | FUSE 支持 | 说明 |
+|----------|----------|------|
+| 普通 runc 容器 | 支持 | 需配置 `/dev/fuse` + `SYS_ADMIN` |
+| Kuasar (Stratovirt 微虚拟机) | **不支持** | 虚拟机内核无 FUSE 模块，需平台侧开启 |
+| Kata Containers | **可能支持** | 取决于虚拟机内核是否编译了 FUSE 模块 |
+| gVisor | **不支持** | Sentry 内核不支持 FUSE |
+
+**安全容器替代方案：** 使用 CSI 模式，FUSE 运行在宿主机上，容器通过标准 PVC 挂载访问，无需容器内特殊权限。
+
+### 常见问题
+
+| 错误 | 原因 | 解决 |
+|------|------|------|
+| `modprobe: module fuse not found` | 内核无 FUSE 模块 | 联系平台团队加 `CONFIG_FUSE=m` |
+| `/dev/fuse: No such file` | 容器未透传设备 | YAML 加 hostPath volume |
+| `failed to open /dev/fuse: Operation not permitted` | 无设备访问权限 | YAML 加 `SYS_ADMIN` capability |
+| `mountpoint is not empty` | 挂载目录非空 | 配置 `"nonempty": true` |
+| `fusermount: not found` | 未安装 fuse 包 | `apt install fuse` 或 `yum install fuse` |
+| Python 版本报错 | 版本低于 3.10 | 升级 Python 或用虚拟环境 |
+
 ## 关键约束
 
 - **非 root 可用。** `allow_other` 默认关闭，普通用户可直接挂载到自己的目录。需要其他用户也能访问挂载点时，用 `--allow-other` 或配置 `"allow_other": true`（需 root 权限）。
