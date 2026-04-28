@@ -14,6 +14,9 @@ import stat
 import time
 from pathlib import PurePosixPath
 
+# EKEYEXPIRED (127) — "Key has expired", more descriptive than EACCES for token expiration
+_ERRNO_TOKEN_EXPIRED = getattr(errno, "EKEYEXPIRED", errno.EACCES)
+
 from .cache import ContentCache
 from .client import DriveKitClient
 from .config import FOLDER_MIME
@@ -73,7 +76,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             parent = str(PurePosixPath(path).parent)
             self._dirtree.ensure_loaded(parent)
         except TokenError:
-            self._raise(errno.EACCES, path)
+            self._raise(_ERRNO_TOKEN_EXPIRED, path)
 
         meta = self._dirtree.resolve(path)
         if meta is None:
@@ -88,7 +91,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         try:
             self._dirtree.ensure_loaded(path)
         except TokenError:
-            self._raise(errno.EACCES, path)
+            self._raise(_ERRNO_TOKEN_EXPIRED, path)
         entries = self._dirtree.list_dir(path)
         return [".", ".."] + entries
 
@@ -109,7 +112,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
                 try:
                     existing = self._client.download_file(meta.id)
                 except TokenError:
-                    self._raise(errno.EACCES, path)
+                    self._raise(_ERRNO_TOKEN_EXPIRED, path)
             self._content_map[fh] = bytearray(existing)
 
         return fh
@@ -132,7 +135,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             try:
                 content = self._client.download_file(file_id)
             except TokenError:
-                self._raise(errno.EACCES, path)
+                self._raise(_ERRNO_TOKEN_EXPIRED, path)
             except Exception as e:
                 logger.error("Download failed for %s: %s", path, e)
                 self._raise(errno.EIO, path)
@@ -157,7 +160,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
                 try:
                     existing = self._client.download_file(file_id)
                 except TokenError:
-                    self._raise(errno.EACCES, path)
+                    self._raise(_ERRNO_TOKEN_EXPIRED, path)
             self._content_map[fh] = bytearray(existing)
 
         buf = self._content_map[fh]
@@ -191,7 +194,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
                 parent_folder=parent_id,
             )
         except TokenError:
-            self._raise(errno.EACCES, path)
+            self._raise(_ERRNO_TOKEN_EXPIRED, path)
 
         file_id = result.get("id", "")
         sha256 = result.get("sha256", "")
@@ -247,7 +250,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         try:
             self._client.delete_file(meta.id)
         except TokenError:
-            self._raise(errno.EACCES, path)
+            self._raise(_ERRNO_TOKEN_EXPIRED, path)
         self._cache.invalidate(meta.id)
         self._dirtree.remove_entry(path)
 
@@ -275,7 +278,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             try:
                 content = self._client.download_file(meta.id)
             except TokenError:
-                self._raise(errno.EACCES, path)
+                self._raise(_ERRNO_TOKEN_EXPIRED, path)
         if length < len(content):
             content = content[:length]
         else:
@@ -302,7 +305,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         try:
             result = self._client.create_folder(folder_name, parent_id)
         except TokenError:
-            self._raise(errno.EACCES, path)
+            self._raise(_ERRNO_TOKEN_EXPIRED, path)
         folder_id = result.get("id", "")
 
         meta = FileMeta(
@@ -330,7 +333,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         try:
             self._client.delete_file(meta.id)
         except TokenError:
-            self._raise(errno.EACCES, path)
+            self._raise(_ERRNO_TOKEN_EXPIRED, path)
         self._dirtree.remove_entry(path)
 
     def rename(self, old_path: str, new_path: str) -> None:
@@ -356,7 +359,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
                 parentFolder=[new_parent_id],
             )
         except TokenError:
-            self._raise(errno.EACCES, old_path)
+            self._raise(_ERRNO_TOKEN_EXPIRED, old_path)
         self._dirtree.move_entry(old_path, new_path)
 
     # ── No-op operations ──
