@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clawfuse.client import DriveKitClient
-from clawfuse.exceptions import DriveKitError
+from clawfuse.exceptions import DriveKitError, TokenError
 from clawfuse.token import TokenManager
 
 
@@ -165,3 +165,59 @@ def test_list_all_files(client: DriveKitClient) -> None:
         result = client.list_all_files(root_folder="root")
         assert len(result) == 3
         assert mock_list.call_count == 2
+
+
+# ── Circuit breaker tests ──
+
+
+def test_401_circuit_breaker_marks_dead(client: DriveKitClient, token_file: Path) -> None:
+    """Persistent 401 marks token as dead — subsequent calls fail immediately."""
+    resp_401 = MagicMock()
+    resp_401.ok = False
+    resp_401.status_code = 401
+    resp_401.text = "Unauthorized"
+
+    with patch("clawfuse.client.requests.get", return_value=resp_401):
+        # First call: 401 → retry → 401 → mark dead → TokenError
+        with pytest.raises(TokenError, match="Token expired"):
+            client.get_file("file1")
+
+    assert client._token.is_dead
+
+    # Second call: immediate TokenError without HTTP request
+    with pytest.raises(TokenError, match="Token expired"):
+        client.get_file("file2")
+
+
+def test_string_mode_cannot_refresh() -> None:
+    """String mode token cannot be refreshed via force_reread."""
+    mgr = TokenManager.from_string("my_static_token")
+    assert mgr.access_token == "my_static_token"
+    assert mgr.current_token == "my_static_token"
+
+    # force_reread returns same token
+    result = mgr.force_reread()
+    assert result == "my_static_token"
+    assert not mgr.is_dead
+
+
+def test_token_mark_dead() -> None:
+    """mark_dead() causes access_token to raise TokenError."""
+    mgr = TokenManager.from_string("my_token")
+    assert mgr.access_token == "my_token"
+
+    mgr.mark_dead()
+    assert mgr.is_dead
+
+    with pytest.raises(TokenError, match="Token expired"):
+        _ = mgr.access_token
+
+
+def test_current_token_property() -> None:
+    """current_token returns value without dead check."""
+    mgr = TokenManager.from_string("my_token")
+    assert mgr.current_token == "my_token"
+
+    mgr.mark_dead()
+    # current_token still works (no dead check)
+    assert mgr.current_token == "my_token"

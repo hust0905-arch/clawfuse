@@ -1,14 +1,14 @@
 {
   "token": "YOUR_ACCESS_TOKEN_HERE",
 
-  "cloud_folder": "applicationData",
-  "mount_point": "/mnt/drive",
+  "cloud_folder": "workspace",
+  "mount_point": "/home/sandbox/.openclaw/workspace",
 
-  "cache_dir": "/tmp/clawfuse-cache",
+  "cache_dir": "/home/sandbox/.openclaw/workspace/.clawfuse-cache",
   "cache_max_mb": 512,
   "cache_max_files": 500,
 
-  "write_buf_dir": "/tmp/clawfuse-writes",
+  "write_buf_dir": "/home/sandbox/.openclaw/workspace/.clawfuse-writes",
   "drain_interval": 5.0,
   "drain_max_retries": 3,
 
@@ -16,5 +16,7 @@
   "list_page_size": 100,
 
   "http_timeout": 30,
+  "allow_other": true,
+  "nonempty": true,
   "log_level": "INFO"
 }

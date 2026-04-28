@@ -18,6 +18,7 @@ from .cache import ContentCache
 from .client import DriveKitClient
 from .config import FOLDER_MIME
 from .dirtree import DirTree, FileMeta
+from .exceptions import TokenError
 from .writebuf import WriteBuffer
 
 logger = logging.getLogger(__name__)
@@ -64,12 +65,15 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         if path == "/":
             return self._dir_stat()
 
-        # Ensure parent directory is loaded before resolve.
-        # This must happen BEFORE the first resolve() call to prevent
-        # resolve() from triggering a legacy refresh() that would
-        # mark directories as loaded without actually fetching them.
-        parent = str(PurePosixPath(path).parent)
-        self._dirtree.ensure_loaded(parent)
+        try:
+            # Ensure parent directory is loaded before resolve.
+            # This must happen BEFORE the first resolve() call to prevent
+            # resolve() from triggering a legacy refresh() that would
+            # mark directories as loaded without actually fetching them.
+            parent = str(PurePosixPath(path).parent)
+            self._dirtree.ensure_loaded(parent)
+        except TokenError:
+            self._raise(errno.EACCES, path)
 
         meta = self._dirtree.resolve(path)
         if meta is None:
@@ -81,7 +85,10 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
     def readdir(self, path: str, fh: int) -> list[str]:
         """List directory contents."""
-        self._dirtree.ensure_loaded(path)
+        try:
+            self._dirtree.ensure_loaded(path)
+        except TokenError:
+            self._raise(errno.EACCES, path)
         entries = self._dirtree.list_dir(path)
         return [".", ".."] + entries
 
@@ -99,7 +106,10 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             existing = self._cache.get(meta.id)
             if existing is None:
                 # Cache miss — download from cloud to avoid data loss
-                existing = self._client.download_file(meta.id)
+                try:
+                    existing = self._client.download_file(meta.id)
+                except TokenError:
+                    self._raise(errno.EACCES, path)
             self._content_map[fh] = bytearray(existing)
 
         return fh
@@ -121,6 +131,8 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             # Download from Drive Kit
             try:
                 content = self._client.download_file(file_id)
+            except TokenError:
+                self._raise(errno.EACCES, path)
             except Exception as e:
                 logger.error("Download failed for %s: %s", path, e)
                 self._raise(errno.EIO, path)
@@ -142,7 +154,10 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             file_id = self._fh_map.get(fh, "")
             existing = self._cache.get(file_id)
             if existing is None:
-                existing = self._client.download_file(file_id)
+                try:
+                    existing = self._client.download_file(file_id)
+                except TokenError:
+                    self._raise(errno.EACCES, path)
             self._content_map[fh] = bytearray(existing)
 
         buf = self._content_map[fh]
@@ -169,11 +184,14 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
             parent_id = parent_meta.id
 
         # Create empty file on Drive Kit
-        result = self._client.create_file(
-            filename=filename,
-            content=b"",
-            parent_folder=parent_id,
-        )
+        try:
+            result = self._client.create_file(
+                filename=filename,
+                content=b"",
+                parent_folder=parent_id,
+            )
+        except TokenError:
+            self._raise(errno.EACCES, path)
 
         file_id = result.get("id", "")
         sha256 = result.get("sha256", "")
@@ -226,7 +244,10 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         if meta is None:
             self._raise(errno.ENOENT, path)
 
-        self._client.delete_file(meta.id)
+        try:
+            self._client.delete_file(meta.id)
+        except TokenError:
+            self._raise(errno.EACCES, path)
         self._cache.invalidate(meta.id)
         self._dirtree.remove_entry(path)
 
@@ -249,7 +270,12 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         if meta is None:
             self._raise(errno.ENOENT, path)
 
-        content = self._cache.get(meta.id) or self._client.download_file(meta.id)
+        content = self._cache.get(meta.id)
+        if content is None:
+            try:
+                content = self._client.download_file(meta.id)
+            except TokenError:
+                self._raise(errno.EACCES, path)
         if length < len(content):
             content = content[:length]
         else:
@@ -273,7 +299,10 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
                 self._raise(errno.ENOENT)
             parent_id = parent_meta.id
 
-        result = self._client.create_folder(folder_name, parent_id)
+        try:
+            result = self._client.create_folder(folder_name, parent_id)
+        except TokenError:
+            self._raise(errno.EACCES, path)
         folder_id = result.get("id", "")
 
         meta = FileMeta(
@@ -298,7 +327,10 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         if children:
             self._raise(errno.ENOTEMPTY, path)
 
-        self._client.delete_file(meta.id)
+        try:
+            self._client.delete_file(meta.id)
+        except TokenError:
+            self._raise(errno.EACCES, path)
         self._dirtree.remove_entry(path)
 
     def rename(self, old_path: str, new_path: str) -> None:
@@ -317,11 +349,14 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
                 self._raise(errno.ENOENT)
             new_parent_id = new_parent_meta.id
 
-        self._client.update_metadata(
-            meta.id,
-            fileName=new_name,
-            parentFolder=[new_parent_id],
-        )
+        try:
+            self._client.update_metadata(
+                meta.id,
+                fileName=new_name,
+                parentFolder=[new_parent_id],
+            )
+        except TokenError:
+            self._raise(errno.EACCES, old_path)
         self._dirtree.move_entry(old_path, new_path)
 
     # ── No-op operations ──

@@ -16,7 +16,7 @@ from typing import Any
 import requests
 
 from .config import API_BASE, FOLDER_MIME, UPLOAD_BASE
-from .exceptions import DriveKitError
+from .exceptions import DriveKitError, TokenError
 from .token import TokenManager
 
 logger = logging.getLogger(__name__)
@@ -53,16 +53,34 @@ class DriveKitClient:
             raise DriveKitError(resp.status_code, resp.text[:500])
 
     def _retry_on_401(self, fn: Any) -> Any:
-        """Call fn(), retry once on 401 after re-reading token file."""
+        """Call fn(), retry once on 401 after re-reading token file.
+
+        Circuit breaker: once token is confirmed expired (401 on retry too),
+        marks it as dead so all subsequent calls fail immediately.
+        """
+        # Fast fail if token is already known dead
+        if self._token.is_dead:
+            raise TokenError("Token expired — cannot be refreshed. Restart with a new token.")
+
         try:
             return fn()
         except DriveKitError as e:
             if e.status_code == 401:
-                logger.info("Token expired (401), re-reading token file")
-                new_token = self._token.force_reread()
-                if new_token:
-                    return fn()
-                raise
+                logger.info("Token expired (401), attempting refresh")
+                self._token.force_reread()
+                try:
+                    result = fn()
+                    # Retry succeeded — token is still valid, unmark dead if needed
+                    return result
+                except DriveKitError as e2:
+                    if e2.status_code == 401:
+                        # Confirmed: token is expired and cannot be refreshed
+                        self._token.mark_dead()
+                        raise TokenError(
+                            "Token expired and cannot be refreshed — "
+                            "update the token file or restart with a new token"
+                        ) from e2
+                    raise
             raise
 
     # ── File CRUD ──

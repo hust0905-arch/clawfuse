@@ -21,6 +21,10 @@ class TokenManager:
     Supports two modes:
     1. Direct token string (from JSON config) — always returns the same value
     2. Token file (from env/legacy) — reads from file, re-reads periodically
+
+    Circuit breaker: once the token is confirmed expired (401) and cannot be
+    refreshed, mark_dead() sets a flag that causes all subsequent API calls to
+    fail immediately instead of waiting for HTTP timeouts.
     """
 
     def __init__(
@@ -40,6 +44,7 @@ class TokenManager:
             raise TokenError("Either token_file or token_string must be provided")
 
         self._last_read_time: float = 0.0
+        self._dead: bool = False
 
     @classmethod
     def from_string(cls, token: str) -> TokenManager:
@@ -53,7 +58,10 @@ class TokenManager:
 
     @property
     def access_token(self) -> str:
-        """Get a valid access_token."""
+        """Get a valid access_token. Raises TokenError if token is dead."""
+        if self._dead:
+            raise TokenError("Token expired and cannot be refreshed — restart with a new token")
+
         if self._mode == "string":
             if not self._token:
                 raise TokenError("Token string is empty")
@@ -66,10 +74,30 @@ class TokenManager:
             raise TokenError(f"Token file is empty or missing: {self._token_file}")
         return self._token
 
+    @property
+    def is_dead(self) -> bool:
+        """Whether the token has been confirmed expired and cannot be refreshed."""
+        return self._dead
+
+    @property
+    def current_token(self) -> str:
+        """Current token value without triggering refresh or dead check.
+
+        Used for comparison (e.g., detecting if force_reread() got a new value).
+        """
+        return self._token
+
+    def mark_dead(self) -> None:
+        """Mark token as expired/unrecoverable. All subsequent API calls fail fast."""
+        self._dead = True
+        logger.error("Token marked as dead — all subsequent API calls will fail immediately")
+
     def force_reread(self) -> str:
         """Force re-read the token file (called on 401 errors).
 
         For string mode, this is a no-op — returns the same token.
+        For file mode, re-reads the file immediately.
+        Returns the token value (may be same as before if file unchanged).
         """
         if self._mode == "string":
             return self._token
