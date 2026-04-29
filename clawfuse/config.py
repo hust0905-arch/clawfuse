@@ -205,8 +205,7 @@ class Config:
         """Create required directories if they don't exist."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.write_buf_dir.mkdir(parents=True, exist_ok=True)
-        mount_parent = Path(self.mount_point).parent
-        mount_parent.mkdir(parents=True, exist_ok=True)
+        Path(self.mount_point).mkdir(parents=True, exist_ok=True)
 
     @property
     def needs_folder_resolution(self) -> bool:

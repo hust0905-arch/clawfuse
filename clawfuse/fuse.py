@@ -224,9 +224,13 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
                 content = bytes(content)
             file_id = self._fh_map.get(fh, "")
             sha256 = hashlib.sha256(content).hexdigest()
+            # Enqueue to write buffer (persistent on disk, survives crashes)
             self._writebuf.enqueue(file_id, path, content, sha256)
-            # Also update cache so subsequent reads see the latest content
-            self._cache.put(file_id, path, content, sha256)
+            # Cache write is best-effort — don't fail flush if cache is full or unwritable
+            try:
+                self._cache.put(file_id, path, content, sha256)
+            except (OSError, Exception) as e:
+                logger.warning("Cache write failed for %s (upload still queued): %s", path, e)
             # Update size in dirtree so getattr returns correct size
             if path:
                 self._dirtree.update_meta(path, size=len(content), sha256=sha256)
