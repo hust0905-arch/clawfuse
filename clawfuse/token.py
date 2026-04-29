@@ -31,15 +31,18 @@ class TokenManager:
         self,
         token_file: Path | None = None,
         token_string: str = "",
+        config_file: Path | None = None,
     ) -> None:
         if token_string:
             self._mode = "string"
             self._token = token_string
             self._token_file: Path | None = None
+            self._config_file: Path | None = config_file
         elif token_file is not None:
             self._mode = "file"
             self._token = ""
             self._token_file = token_file
+            self._config_file = None
         else:
             raise TokenError("Either token_file or token_string must be provided")
 
@@ -47,9 +50,13 @@ class TokenManager:
         self._dead: bool = False
 
     @classmethod
-    def from_string(cls, token: str) -> TokenManager:
-        """Create a TokenManager with a direct token string."""
-        return cls(token_string=token)
+    def from_string(cls, token: str, config_file: Path | None = None) -> TokenManager:
+        """Create a TokenManager with a direct token string.
+
+        If config_file is provided, force_reread() can re-read the token
+        from the JSON config file when it's updated externally.
+        """
+        return cls(token_string=token, config_file=config_file)
 
     @classmethod
     def from_file(cls, path: Path) -> TokenManager:
@@ -93,16 +100,60 @@ class TokenManager:
         logger.error("Token marked as dead — all subsequent API calls will fail immediately")
 
     def force_reread(self) -> str:
-        """Force re-read the token file (called on 401 errors).
+        """Force re-read the token (called on 401 errors).
 
-        For string mode, this is a no-op — returns the same token.
-        For file mode, re-reads the file immediately.
+        For file mode: re-reads the token file immediately.
+        For string mode with config_file: re-reads the JSON config file.
+        For string mode without config_file: no-op, returns the same token.
+
+        If the token value changed, resets the dead flag (circuit breaker revival).
+
         Returns the token value (may be same as before if file unchanged).
         """
+        old_token = self._token
+
         if self._mode == "string":
+            if self._config_file is not None:
+                self._reread_config_file()
             return self._token
+
+        # File mode
         self._last_read_time = 0.0
-        return self.access_token
+        self._read_token_file()
+
+        # Revive circuit breaker if token changed
+        if self._dead and self._token != old_token:
+            self._dead = False
+            logger.info("Token revived: token file was updated with a new value")
+
+        return self._token
+
+    def try_revive(self) -> bool:
+        """Check if token source has been updated. Returns True if token changed.
+
+        Called when the circuit breaker is active (is_dead=True) to check
+        if an external process has updated the token file/config.
+        """
+        old_token = self._token
+
+        if self._mode == "string":
+            if self._config_file is not None:
+                self._reread_config_file()
+            else:
+                return False  # No way to get a new token in pure string mode
+        else:
+            # File mode
+            try:
+                self._read_token_file()
+            except TokenError:
+                return False
+
+        if self._token != old_token:
+            self._dead = False
+            logger.info("Token revived: new token detected")
+            return True
+
+        return False
 
     @property
     def token_file_path(self) -> Path | None:
@@ -147,3 +198,28 @@ class TokenManager:
 
         self._last_read_time = time.monotonic()
         logger.debug("Token re-read from %s (%d chars)", self._token_file, len(self._token))
+
+    def _reread_config_file(self) -> None:
+        """Re-read token from the JSON config file (string mode with config_file).
+
+        If the config file has been updated with a new token, updates self._token
+        and resets the dead flag.
+        """
+        assert self._config_file is not None
+
+        try:
+            raw = self._config_file.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            new_token = data.get("token", "").strip()
+        except (OSError, json.JSONDecodeError, KeyError) as e:
+            logger.warning("Failed to re-read config file %s: %s", self._config_file, e)
+            return
+
+        if not new_token:
+            logger.warning("Config file %s has empty token field", self._config_file)
+            return
+
+        if new_token != self._token:
+            logger.info("Token updated via config file %s", self._config_file)
+            self._token = new_token
+            self._dead = False

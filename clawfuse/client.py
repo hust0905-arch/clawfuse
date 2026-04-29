@@ -57,10 +57,15 @@ class DriveKitClient:
 
         Circuit breaker: once token is confirmed expired (401 on retry too),
         marks it as dead so all subsequent calls fail immediately.
+        Revival: if an external process updates the token file/config,
+        try_revive() detects the change and resets the circuit breaker.
         """
-        # Fast fail if token is already known dead
+        # Fast fail if token is dead — but check for external token updates first
         if self._token.is_dead:
-            raise TokenError("Token expired — cannot be refreshed. Restart with a new token.")
+            if self._token.try_revive():
+                logger.info("Token revived from external update, retrying API call")
+            else:
+                raise TokenError("Token expired — cannot be refreshed. Restart with a new token.")
 
         try:
             return fn()

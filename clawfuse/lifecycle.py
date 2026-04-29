@@ -246,7 +246,10 @@ class LifecycleManager:
     def _create_token_manager(self) -> TokenManager:
         """Create TokenManager based on config mode."""
         if self._config.token_string:
-            return TokenManager.from_string(self._config.token_string)
+            return TokenManager.from_string(
+                self._config.token_string,
+                config_file=self._config.config_file_path,
+            )
         if self._config.token_file is not None:
             return TokenManager.from_file(self._config.token_file)
         raise TokenError("No token configured — set token in config file or CLAWFUSE_TOKEN_FILE")

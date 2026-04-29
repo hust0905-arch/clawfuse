@@ -77,6 +77,9 @@ class Config:
     token_file: Path | None = None
     token_string: str = ""
 
+    # Config file path (set when loaded from JSON, enables token hot-reload)
+    config_file_path: Path | None = None
+
     # Core mapping
     cloud_folder: str = DEFAULT_ROOT_FOLDER
     mount_point: str = DEFAULT_MOUNT_POINT
@@ -139,6 +142,7 @@ class Config:
         return cls(
             token_file=None,
             token_string=token,
+            config_file_path=path,
             cloud_folder=cloud_folder,
             mount_point=data.get("mount_point", DEFAULT_MOUNT_POINT),
             root_folder=cloud_folder if _looks_like_folder_id(cloud_folder) else DEFAULT_ROOT_FOLDER,
