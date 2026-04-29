@@ -280,13 +280,18 @@ class LifecycleManager:
         root_id = self._discover_application_data_root(client)
 
         if root_id != "applicationData":
-            # Normal path: root discovered, search for named folder
-            result = client.list_files(parent_folder=root_id, page_size=100)
-            for f in result.get("files", []):
-                if f.get("fileName") == folder_name and f.get("mimeType") == FOLDER_MIME:
-                    folder_id = f["id"]
-                    logger.info("Resolved '%s' → %s", folder_name, folder_id)
-                    return folder_id
+            # Normal path: root discovered, paginate through root to find named folder
+            cursor: str | None = None
+            while True:
+                result = client.list_files(parent_folder=root_id, page_size=100, cursor=cursor)
+                for f in result.get("files", []):
+                    if f.get("fileName") == folder_name and f.get("mimeType") == FOLDER_MIME:
+                        folder_id = f["id"]
+                        logger.info("Resolved '%s' → %s", folder_name, folder_id)
+                        return folder_id
+                cursor = result.get("nextCursor")
+                if not cursor:
+                    break
 
         # Folder not found (or empty container) — auto-create
         logger.info(
