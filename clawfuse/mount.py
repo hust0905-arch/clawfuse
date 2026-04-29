@@ -98,13 +98,16 @@ def main() -> None:
     # Register signal handlers for graceful shutdown
     def _shutdown(signum: int, frame: object) -> None:
         logger.info("Received signal %d, shutting down...", signum)
-        sync_result = lifecycle.pre_destroy()
-        logger.info(
-            "Shutdown complete: %d synced, %d failed",
-            sync_result.files_synced,
-            sync_result.files_failed,
-        )
-        sys.exit(0 if sync_result.files_failed == 0 else 1)
+        try:
+            sync_result = lifecycle.pre_destroy(timeout=10)
+            logger.info(
+                "Shutdown complete: %d synced, %d failed",
+                sync_result.files_synced,
+                sync_result.files_failed,
+            )
+        except Exception as e:
+            logger.error("Shutdown flush failed: %s", e)
+        sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
