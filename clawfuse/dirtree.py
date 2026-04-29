@@ -363,27 +363,34 @@ class DirTree:
         """Call list_files API for dir_id, merge results into indexes.
 
         Uses queryParam='{dir_id}' in parentFolder to list only direct
-        children of the requested directory.
+        children of the requested directory. Paginates through all pages
+        using the same while-True pattern as list_all_files / _resolve_root_folder.
         """
-        result = self._client.list_files(parent_folder=dir_id)
-        files = result.get("files", [])
+        all_files: list[dict] = []
+        cursor: str | None = None
+        page_count = 0
 
-        # Handle pagination
-        cursor = result.get("nextCursor")
-        while cursor and files:
-            page = self._client.list_files(parent_folder=dir_id, cursor=cursor)
-            new_files = page.get("files", [])
-            new_cursor = page.get("nextCursor")
-            if not new_files or new_cursor == cursor:
+        while True:
+            result = self._client.list_files(parent_folder=dir_id, cursor=cursor)
+            files = result.get("files", [])
+            all_files.extend(files)
+            page_count += 1
+
+            cursor = result.get("nextCursor")
+            if not cursor or not files:
                 break
-            files.extend(new_files)
-            cursor = new_cursor
+
+        if page_count > 1:
+            logger.info(
+                "Paginated dir %s: %d items across %d pages",
+                dir_id, len(all_files), page_count,
+            )
 
         # Build path cache for resolving parent chains
         path_cache: dict[str, str] = {}
 
         with self._lock:
-            for item in files:
+            for item in all_files:
                 item_id = item.get("id", "")
                 if not item_id:
                     continue
