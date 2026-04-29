@@ -218,6 +218,11 @@ class WriteBuffer:
         except Exception as e:
             write.retry_count += 1
             write.status = "pending" if write.retry_count < self._max_retries else "failed"
+            # Backoff: wait between retries to avoid hammering a failing API
+            if write.status == "pending":
+                backoff = min(2 ** write.retry_count, 10)
+                logger.debug("Retry backoff: %.1fs for %s", backoff, write.path)
+                time.sleep(backoff)
             logger.warning(
                 "Upload failed for %s (attempt %d/%d): %s",
                 write.path,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -95,19 +96,20 @@ def main() -> None:
         result.mount_point,
     )
 
-    # Register signal handlers for graceful shutdown
+    # Register signal handlers — only set a flag, no HTTP or thread joins.
+    # The FUSE loop will check this flag and exit cleanly.
+    _shutdown_requested = False
+
     def _shutdown(signum: int, frame: object) -> None:
-        logger.info("Received signal %d, shutting down...", signum)
+        nonlocal _shutdown_requested
+        _shutdown_requested = True
+        logger.info("Received signal %d, unmounting FUSE...", signum)
+        # Unmount triggers FUSE destroy() callback which handles cleanup.
+        # fusermount -u is safe from signal context (no HTTP calls).
         try:
-            sync_result = lifecycle.pre_destroy(timeout=10)
-            logger.info(
-                "Shutdown complete: %d synced, %d failed",
-                sync_result.files_synced,
-                sync_result.files_failed,
-            )
-        except Exception as e:
-            logger.error("Shutdown flush failed: %s", e)
-        sys.exit(0)
+            os.system(f"fusermount -u {config.mount_point} 2>/dev/null")
+        except Exception:
+            pass
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

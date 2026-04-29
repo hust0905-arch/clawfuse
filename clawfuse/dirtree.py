@@ -52,10 +52,12 @@ class DirTree:
         client: DriveKitClient,
         root_folder: str = "applicationData",
         refresh_ttl: float = 10.0,
+        load_wait_timeout: float = 10.0,
     ) -> None:
         self._client = client
         self._root_folder = root_folder
         self._refresh_ttl = refresh_ttl
+        self._load_wait_timeout = load_wait_timeout
         self._last_refresh: float = 0.0
 
         # Core indexes (shared by both legacy and lazy modes)
@@ -66,6 +68,7 @@ class DirTree:
         # Lazy-loading state
         self._loaded_dirs: set[str] = set()     # dir_ids already loaded from API
         self._loading: set[str] = set()          # dir_ids currently being loaded
+        self._failed_dirs: dict[str, float] = {}  # dir_id → timestamp of last failure (circuit breaker)
         self._lock = threading.Lock()            # protects _loaded_dirs, _loading, and indexes
         self._load_condition = threading.Condition(self._lock)  # wait/notify for load completion
 
@@ -92,7 +95,9 @@ class DirTree:
 
         Thread-safe. If the directory is already loaded, returns immediately.
         If another thread is currently loading this directory, blocks until
-        it finishes (using Condition.wait — zero CPU overhead).
+        it finishes (with timeout to prevent indefinite blocking).
+        Circuit breaker: if the directory recently failed, skip loading for
+        a cooldown period to avoid hammering a failing API.
         """
         self._lazy_mode = True
 
@@ -100,18 +105,38 @@ class DirTree:
         if dir_id in self._loaded_dirs:
             return
 
+        # Circuit breaker: skip if this dir recently failed (within cooldown)
+        with self._lock:
+            fail_time = self._failed_dirs.get(dir_id)
+            if fail_time is not None and (time.monotonic() - fail_time) < 5.0:
+                logger.debug("Skipping load for recently failed dir %s (cooldown)", dir_id)
+                return
+
         with self._load_condition:
             if dir_id in self._loaded_dirs:  # double-check after acquiring lock
                 return
             if dir_id in self._loading:
-                # Another thread is loading this dir — wait efficiently
+                # Another thread is loading this dir — wait with timeout
+                deadline = time.monotonic() + self._load_wait_timeout
                 while dir_id in self._loading:
-                    self._load_condition.wait()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        logger.warning("Timeout waiting for dir %s to load", dir_id)
+                        return  # Don't block FUSE indefinitely
+                    self._load_condition.wait(timeout=remaining)
                 return
             self._loading.add(dir_id)
 
         try:
             self._load_dir_from_api(dir_id)
+            # Success — clear any previous failure record
+            with self._lock:
+                self._failed_dirs.pop(dir_id, None)
+        except Exception:
+            # Record failure time for circuit breaker cooldown
+            with self._lock:
+                self._failed_dirs[dir_id] = time.monotonic()
+            raise
         finally:
             with self._load_condition:
                 self._loading.discard(dir_id)

@@ -388,11 +388,14 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
     # ── Lifecycle ──
 
     def destroy(self, private_data: int) -> None:
-        """FUSE unmount callback. Flush all dirty data."""
-        logger.info("FUSE destroy called — flushing dirty data")
-        for fh in list(self._dirty):
-            if fh in self._fh_map:
-                self.flush("", fh)
+        """FUSE unmount callback. Log dirty data count for visibility."""
+        if self._dirty:
+            logger.warning(
+                "FUSE destroy: %d dirty file handles not flushed (upload in background)",
+                len(self._dirty),
+            )
+        else:
+            logger.info("FUSE destroy: clean shutdown")
 
     def mount(self, mountpoint: str, foreground: bool = False, allow_other: bool = False, nonempty: bool = False) -> None:
         """Mount the FUSE filesystem.
