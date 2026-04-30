@@ -104,10 +104,18 @@ def main() -> None:
         nonlocal _shutdown_requested
         _shutdown_requested = True
         logger.info("Received signal %d, unmounting FUSE...", signum)
-        # Unmount triggers FUSE destroy() callback which handles cleanup.
-        # fusermount -u is safe from signal context (no HTTP calls).
+        # Non-blocking: fork fusermount so the FUSE main thread is NOT blocked.
+        # os.system() is synchronous and causes deadlock — fusermount waits for
+        # the kernel's DESTROY request, but DESTROY needs the FUSE main thread
+        # to process, and the main thread is blocked in os.system().
+        # subprocess.Popen returns immediately, letting the FUSE loop handle DESTROY.
         try:
-            os.system(f"fusermount -u {config.mount_point} 2>/dev/null")
+            import subprocess
+            subprocess.Popen(
+                ["fusermount", "-u", config.mount_point],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except Exception:
             pass
 

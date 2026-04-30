@@ -174,7 +174,7 @@ class DirTree:
         # Load the target directory itself
         self.load_dir(current_id)
 
-    def background_full_load(self, max_workers: int = 8) -> None:
+    def background_full_load(self, max_workers: int = 4) -> None:
         """Background BFS: load all directory metadata as fast as possible.
 
         Uses ThreadPoolExecutor for parallel directory loading.

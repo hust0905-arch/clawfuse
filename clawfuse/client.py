@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 
@@ -27,9 +28,12 @@ DEFAULT_FIELDS = "id,fileName,mimeType,sha256,size,parentFolder,modifiedTime"
 class DriveKitClient:
     """Simplified Drive Kit REST API client for ClawFUSE."""
 
-    def __init__(self, token_manager: TokenManager, timeout: int = 30) -> None:
+    def __init__(self, token_manager: TokenManager, timeout: int = 30, max_concurrent: int = 8) -> None:
         self._token = token_manager
         self._timeout = timeout
+        # Limit concurrent API calls to prevent thread explosion when
+        # background BFS and FUSE operations both hit the API simultaneously.
+        self._semaphore = threading.Semaphore(max_concurrent)
 
     @property
     def _auth(self) -> dict[str, str]:
@@ -55,6 +59,11 @@ class DriveKitClient:
     def _retry_on_401(self, fn: Any) -> Any:
         """Call fn(), retry once on 401 after re-reading token file.
 
+        Rate-limits concurrent API calls via semaphore to prevent thread
+        explosion when background BFS and FUSE operations hit the API
+        simultaneously. Without this limit, slow API responses cause all
+        threads to block, making the filesystem appear hung.
+
         Circuit breaker: once token is confirmed expired (401 on retry too),
         marks it as dead so all subsequent calls fail immediately.
         Revival: if an external process updates the token file/config,
@@ -67,26 +76,27 @@ class DriveKitClient:
             else:
                 raise TokenError("Token expired — cannot be refreshed. Restart with a new token.")
 
-        try:
-            return fn()
-        except DriveKitError as e:
-            if e.status_code == 401:
-                logger.info("Token expired (401), attempting refresh")
-                self._token.force_reread()
-                try:
-                    result = fn()
-                    # Retry succeeded — token is still valid, unmark dead if needed
-                    return result
-                except DriveKitError as e2:
-                    if e2.status_code == 401:
-                        # Confirmed: token is expired and cannot be refreshed
-                        self._token.mark_dead()
-                        raise TokenError(
-                            "Token expired and cannot be refreshed — "
-                            "update the token file or restart with a new token"
-                        ) from e2
-                    raise
-            raise
+        with self._semaphore:
+            try:
+                return fn()
+            except DriveKitError as e:
+                if e.status_code == 401:
+                    logger.info("Token expired (401), attempting refresh")
+                    self._token.force_reread()
+                    try:
+                        result = fn()
+                        # Retry succeeded — token is still valid, unmark dead if needed
+                        return result
+                    except DriveKitError as e2:
+                        if e2.status_code == 401:
+                            # Confirmed: token is expired and cannot be refreshed
+                            self._token.mark_dead()
+                            raise TokenError(
+                                "Token expired and cannot be refreshed — "
+                                "update the token file or restart with a new token"
+                            ) from e2
+                        raise
+                raise
 
     # ── File CRUD ──
 
