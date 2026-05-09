@@ -180,8 +180,11 @@ class WriteBuffer:
                 break
             self._drain_one_batch()
 
-    # Errors that indicate the file is gone — no point retrying.
-    _NO_RETRY_SUBSTRS = ("CONTENT_NOT_FOUND", "not found", "404")
+    # Errors that indicate retrying is pointless — permanent failures.
+    _NO_RETRY_SUBSTRS = (
+        "CONTENT_NOT_FOUND", "not found", "404",  # file deleted on Drive Kit
+        "PARAM_INVALID",                             # request body rejected (e.g. too large for multipart)
+    )
 
     def _drain_one_batch(self) -> None:
         """Upload all pending writes in one batch. Clean up stale failed entries."""
@@ -300,23 +303,52 @@ class WriteBuffer:
         (self._buffer_dir / f"{file_id}.buf").unlink(missing_ok=True)
         (self._buffer_dir / f"{file_id}.wmeta").unlink(missing_ok=True)
 
+    # Max total content to restore from disk — prevents OOM on startup
+    # if many large .buf files accumulated from a crashed session.
+    _MAX_RESTORE_BYTES = 128 * 1024 * 1024  # 128 MB
+
     def _restore_from_disk(self) -> None:
-        """Restore pending writes from .buf + .wmeta files."""
+        """Restore pending writes from .buf + .wmeta files.
+
+        Skips files that exceed the memory budget to prevent OOM on startup.
+        Skipped .buf files are left on disk for manual recovery.
+        """
         meta_files = list(self._buffer_dir.glob("*.wmeta"))
         if not meta_files:
             return
 
-        restored = 0
+        # Sort by file size (smallest first) to maximize count within budget
+        candidates: list[tuple[Path, dict, int]] = []
         for meta_path in meta_files:
             try:
                 data = json.loads(meta_path.read_text(encoding="utf-8"))
                 file_id = data["file_id"]
                 buf_path = self._buffer_dir / f"{file_id}.buf"
-
                 if not buf_path.exists():
                     meta_path.unlink(missing_ok=True)
                     continue
+                buf_size = buf_path.stat().st_size
+                candidates.append((meta_path, data, buf_size))
+            except (json.JSONDecodeError, OSError, KeyError) as e:
+                logger.warning("Skipping corrupt write meta %s: %s", meta_path, e)
 
+        candidates.sort(key=lambda x: x[2])  # smallest first
+
+        restored = 0
+        skipped = 0
+        total_bytes = 0
+        for meta_path, data, buf_size in candidates:
+            if total_bytes + buf_size > self._MAX_RESTORE_BYTES:
+                logger.warning(
+                    "Skipping large pending write %s (%d bytes) — would exceed restore budget",
+                    data.get("path", "?"), buf_size,
+                )
+                skipped += 1
+                continue
+
+            file_id = data["file_id"]
+            buf_path = self._buffer_dir / f"{file_id}.buf"
+            try:
                 content = buf_path.read_bytes()
                 pending = PendingWrite(
                     file_id=file_id,
@@ -327,8 +359,12 @@ class WriteBuffer:
                 )
                 self._queue[file_id] = pending
                 restored += 1
-            except (json.JSONDecodeError, OSError, KeyError) as e:
-                logger.warning("Skipping corrupt write meta %s: %s", meta_path, e)
+                total_bytes += len(content)
+            except OSError as e:
+                logger.warning("Failed to read .buf file %s: %s", buf_path, e)
 
-        if restored:
-            logger.info("Restored %d pending writes from disk", restored)
+        if restored or skipped:
+            logger.info(
+                "Restored %d pending writes from disk (%d bytes), skipped %d large files",
+                restored, total_bytes, skipped,
+            )
