@@ -180,8 +180,20 @@ class WriteBuffer:
                 break
             self._drain_one_batch()
 
+    # Errors that indicate the file is gone — no point retrying.
+    _NO_RETRY_SUBSTRS = ("CONTENT_NOT_FOUND", "not found", "404")
+
     def _drain_one_batch(self) -> None:
-        """Upload all pending writes in one batch."""
+        """Upload all pending writes in one batch. Clean up stale failed entries."""
+        # Purge old failed entries (from previous drain cycles) that are just
+        # taking up space.  Their .buf files are kept on disk for manual recovery.
+        with self._lock:
+            stale = [fid for fid, w in self._queue.items() if w.status == "failed"]
+            for fid in stale:
+                self._queue.pop(fid, None)
+            if stale:
+                logger.debug("Purged %d stale failed writes from queue", len(stale))
+
         with self._lock:
             pending = [w for w in list(self._queue.values()) if w.status == "pending"]
 
@@ -192,6 +204,16 @@ class WriteBuffer:
                 with self._lock:
                     self._queue.pop(write.file_id, None)
                 self._remove_buf_files(write.file_id)
+
+    def _mark_failed(self, write: PendingWrite) -> None:
+        """Mark a write as permanently failed and release its memory."""
+        write.status = "failed"
+        size = len(write.content) if write.content else 0
+        write.content = b""  # Release memory
+        logger.warning(
+            "Giving up on %s (%d bytes) after %d attempts — content released",
+            write.path, size, write.retry_count,
+        )
 
     def _upload_one(self, write: PendingWrite) -> bool:
         """Upload a single pending write. Returns True on success."""
@@ -217,6 +239,17 @@ class WriteBuffer:
 
         except Exception as e:
             write.retry_count += 1
+            err_msg = str(e)
+
+            # File already deleted on Drive Kit (404) — no point retrying
+            if any(s in err_msg for s in self._NO_RETRY_SUBSTRS):
+                logger.warning(
+                    "Upload aborted for %s: file no longer exists on Drive Kit — %s",
+                    write.path, err_msg[:200],
+                )
+                self._mark_failed(write)
+                return False
+
             write.status = "pending" if write.retry_count < self._max_retries else "failed"
             # Backoff: wait between retries to avoid hammering a failing API.
             # Use _stop_event.wait() instead of time.sleep() so the drain
@@ -225,6 +258,9 @@ class WriteBuffer:
                 backoff = min(2 ** write.retry_count, 10)
                 logger.debug("Retry backoff: %.1fs for %s", backoff, write.path)
                 self._stop_event.wait(timeout=backoff)
+            else:
+                # All retries exhausted — release memory
+                self._mark_failed(write)
             logger.warning(
                 "Upload failed for %s (attempt %d/%d): %s",
                 write.path,

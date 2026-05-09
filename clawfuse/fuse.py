@@ -41,6 +41,11 @@ except ImportError:
 class ClawFUSE(_FuseOperations):  # type: ignore[misc]
     """FUSE filesystem operations backed by Drive Kit."""
 
+    # File patterns that are local-only — never synced to Drive Kit.
+    # Covers vim/emacs/editor temp files and common backup patterns.
+    _LOCAL_ONLY_SUFFIXES = (".swp", ".swo", ".swn", "~", ".bak")
+    _LOCAL_ONLY_PREFIXES = (".~",)  # LibreOffice lock files like .~lock.docx#
+
     def __init__(
         self,
         client: DriveKitClient,
@@ -56,7 +61,7 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         self._root_folder = root_folder
 
         # File handle state
-        self._fh_map: dict[int, str] = {}  # fh → file_id
+        self._fh_map: dict[int, str] = {}  # fh → file_id ("" = local-only)
         self._content_map: dict[int, bytearray] = {}  # fh → write buffer
         self._dirty: set[int] = set()
         self._next_fh: int = 1
@@ -80,6 +85,14 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
         meta = self._dirtree.resolve(path)
         if meta is None:
+            # Local-only temp files may exist in _content_map but not in dirtree.
+            # Return stat with current buffer size so the editor can work with them.
+            if self._is_local_only(path):
+                size = 0
+                for fh_val, buf in self._content_map.items():
+                    if self._fh_map.get(fh_val) == "" and fh_val in self._dirty:
+                        size = max(size, len(buf))
+                return self._file_stat(size)
             self._raise(errno.ENOENT, path)
 
         if meta.is_dir:
@@ -175,8 +188,17 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
     def create(self, path: str, mode: int) -> int:
         """Create a new file."""
-        parent_path = str(PurePosixPath(path).parent)
         filename = PurePosixPath(path).name
+
+        # Local-only temp files: keep in memory, skip Drive Kit entirely
+        if self._is_local_only(path):
+            fh = self._alloc_fh()
+            self._fh_map[fh] = ""  # empty file_id = local-only marker
+            self._content_map[fh] = bytearray()
+            logger.debug("Local-only file (no Drive Kit sync): %s", path)
+            return fh
+
+        parent_path = str(PurePosixPath(path).parent)
 
         # Resolve parent folder (root uses root_folder ID)
         parent_id = self._root_folder
@@ -217,6 +239,11 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
     def flush(self, path: str, fh: int) -> None:
         """Flush file: enqueue dirty content to write buffer and update cache."""
+        # Local-only files: just mark clean, no Drive Kit operations
+        if not self._fh_map.get(fh):
+            self._dirty.discard(fh)
+            return
+
         if fh in self._dirty:
             content = self._content_map.get(fh, b"")
             # Convert bytearray to bytes for cache and write buffer
@@ -247,6 +274,11 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
 
     def unlink(self, path: str) -> None:
         """Delete a file."""
+        # Local-only temp files were never on Drive Kit — just remove from dirtree
+        if self._is_local_only(path):
+            self._dirtree.remove_entry(path)
+            return
+
         meta = self._dirtree.resolve(path)
         if meta is None:
             self._raise(errno.ENOENT, path)
@@ -427,6 +459,15 @@ class ClawFUSE(_FuseOperations):  # type: ignore[misc]
         FUSE(self, mountpoint, foreground=True, ro=False, allow_other=allow_other, nonempty=nonempty)
 
     # ── Helpers ──
+
+    @staticmethod
+    def _is_local_only(path: str) -> bool:
+        """Check if a file should only exist locally, never synced to Drive Kit."""
+        name = PurePosixPath(path).name
+        return (
+            any(name.endswith(s) for s in ClawFUSE._LOCAL_ONLY_SUFFIXES)
+            or any(name.startswith(p) for p in ClawFUSE._LOCAL_ONLY_PREFIXES)
+        )
 
     def _alloc_fh(self) -> int:
         """Allocate a new file handle."""

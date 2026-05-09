@@ -35,6 +35,14 @@ class DriveKitClient:
         # background BFS and FUSE operations both hit the API simultaneously.
         self._semaphore = threading.Semaphore(max_concurrent)
 
+    def _upload_timeout(self, content_size: int) -> int:
+        """Calculate upload timeout based on content size.
+
+        Base timeout + 1 second per MB, capped at 10 minutes.
+        """
+        mb = content_size / (1024 * 1024)
+        return min(self._timeout + int(mb * 1.0), 600)
+
     @property
     def _auth(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token.access_token}"}
@@ -129,7 +137,7 @@ class DriveKitClient:
                 headers={**self._auth, "Content-Type": f"multipart/related; boundary={boundary}"},
                 params=self._params(uploadType="multipart", fields=fields),
                 data=body,
-                timeout=self._timeout,
+                timeout=self._upload_timeout(len(content)),
             )
             return self._check(resp)
 
@@ -160,7 +168,7 @@ class DriveKitClient:
                 headers={**self._auth, "Content-Type": f"multipart/related; boundary={boundary}"},
                 params=self._params(uploadType="multipart", fields=fields),
                 data=body,
-                timeout=self._timeout,
+                timeout=self._upload_timeout(len(content)),
             )
             return self._check(resp)
 
