@@ -230,6 +230,12 @@ class WriteBuffer:
 
             # Choose upload method based on content size
             use_resumable = content_size > self._upload_cutoff
+            logger.info(
+                "Uploading %s (%d bytes, %s, file_id=%s)",
+                write.path, content_size,
+                "resumable" if use_resumable else "multipart",
+                write.file_id[:16] if write.file_id else "(new)",
+            )
 
             if write.file_id:
                 # Update existing file

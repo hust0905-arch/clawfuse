@@ -227,6 +227,11 @@ class DriveKitClient:
         """
         total_size = len(content)
         offset = 0
+        total_chunks = (total_size + chunk_size - 1) // chunk_size
+        logger.info(
+            "Resumable upload started: %d bytes, %d chunks of %d bytes",
+            total_size, total_chunks, chunk_size,
+        )
 
         while offset < total_size:
             end = min(offset + chunk_size, total_size)
@@ -243,6 +248,13 @@ class DriveKitClient:
                         },
                         data=chunk,
                         timeout=self._upload_timeout(chunk_size),
+                    )
+                    logger.info(
+                        "Chunk %d/%d uploaded: offset=%d status=%d",
+                        offset // chunk_size + 1,
+                        (total_size + chunk_size - 1) // chunk_size,
+                        offset,
+                        resp.status_code,
                     )
                     break
                 except (requests.ConnectionError, requests.Timeout) as exc:
