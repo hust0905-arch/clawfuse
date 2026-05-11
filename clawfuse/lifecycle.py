@@ -117,6 +117,8 @@ class LifecycleManager:
                 buffer_dir=self._config.write_buf_dir,
                 drain_interval=self._config.drain_interval,
                 max_retries=self._config.drain_max_retries,
+                upload_cutoff=self._config.upload_cutoff,
+                upload_chunk_size=self._config.upload_chunk_size,
             )
 
             # 8. Start drain thread

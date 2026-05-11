@@ -53,11 +53,15 @@ class WriteBuffer:
         buffer_dir: Path,
         drain_interval: float = 5.0,
         max_retries: int = 3,
+        upload_cutoff: int = 20 * 1024 * 1024,
+        upload_chunk_size: int = 8 * 1024 * 1024,
     ) -> None:
         self._client = client
         self._buffer_dir = buffer_dir
         self._drain_interval = drain_interval
         self._max_retries = max_retries
+        self._upload_cutoff = upload_cutoff
+        self._upload_chunk_size = upload_chunk_size
 
         # file_id → PendingWrite
         self._queue: dict[str, PendingWrite] = {}
@@ -222,22 +226,41 @@ class WriteBuffer:
         """Upload a single pending write. Returns True on success."""
         try:
             write.status = "uploading"
+            content_size = len(write.content)
+
+            # Choose upload method based on content size
+            use_resumable = content_size > self._upload_cutoff
 
             if write.file_id:
                 # Update existing file
-                result = self._client.update_file(write.file_id, write.content)
+                if use_resumable:
+                    result = self._client.update_file_resumable(
+                        write.file_id, write.content,
+                        chunk_size=self._upload_chunk_size,
+                    )
+                else:
+                    result = self._client.update_file(write.file_id, write.content)
             else:
                 # Create new file
                 name = Path(write.path).name
                 parent_id = self._guess_parent_id(write.path)
-                result = self._client.create_file(
-                    filename=name,
-                    content=write.content,
-                    parent_folder=parent_id,
-                )
+                if use_resumable:
+                    result = self._client.create_file_resumable(
+                        filename=name,
+                        content=write.content,
+                        parent_folder=parent_id,
+                        chunk_size=self._upload_chunk_size,
+                    )
+                else:
+                    result = self._client.create_file(
+                        filename=name,
+                        content=write.content,
+                        parent_folder=parent_id,
+                    )
                 write.file_id = result.get("id", write.file_id)
 
-            logger.info("Uploaded: %s (%d bytes)", write.path, len(write.content))
+            method = "resumable" if use_resumable else "multipart"
+            logger.info("Uploaded (%s): %s (%d bytes)", method, write.path, content_size)
             return True
 
         except Exception as e:

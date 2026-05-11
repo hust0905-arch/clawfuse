@@ -38,10 +38,10 @@ class DriveKitClient:
     def _upload_timeout(self, content_size: int) -> int:
         """Calculate upload timeout based on content size.
 
-        Base timeout + 1 second per MB, capped at 10 minutes.
+        Base timeout + 3 seconds per MB, capped at 10 minutes.
         """
         mb = content_size / (1024 * 1024)
-        return min(self._timeout + int(mb * 1.0), 600)
+        return min(self._timeout + int(mb * 3.0), 600)
 
     @property
     def _auth(self) -> dict[str, str]:
@@ -173,6 +173,147 @@ class DriveKitClient:
             return self._check(resp)
 
         return self._retry_on_401(_do)
+
+    # ── Resumable (chunked) upload ──
+
+    def _initiate_resumable(
+        self,
+        method: str,
+        url: str,
+        meta: dict,
+        total_size: int,
+        content_type: str = "application/octet-stream",
+        fields: str = DEFAULT_FIELDS,
+    ) -> str:
+        """Initiate a resumable upload session. Returns upload URI."""
+
+        def _do() -> str:
+            resp = requests.request(
+                method,
+                url,
+                headers={
+                    **self._auth,
+                    "Content-Type": "application/json",
+                    "X-Upload-Content-Type": content_type,
+                    "X-Upload-Content-Length": str(total_size),
+                },
+                params=self._params(uploadType="resume", fields=fields),
+                json=meta,
+                timeout=self._timeout,
+            )
+            self._check_status(resp)
+            location = resp.headers.get("Location") or resp.headers.get("location")
+            if not location:
+                raise DriveKitError(
+                    resp.status_code,
+                    "No Location header in resumable upload initiation response",
+                )
+            return location
+
+        return self._retry_on_401(_do)
+
+    def _upload_chunks(
+        self,
+        upload_uri: str,
+        content: bytes,
+        chunk_size: int,
+        max_chunk_retries: int = 3,
+    ) -> dict:
+        """Upload content in chunks to a resumable upload URI.
+
+        Each chunk is a PUT with Content-Range header.  Intermediate chunks
+        return 308 Resume Incomplete; the final chunk returns 200 with file
+        metadata.
+        """
+        total_size = len(content)
+        offset = 0
+
+        while offset < total_size:
+            end = min(offset + chunk_size, total_size)
+            chunk = content[offset:end]
+
+            for attempt in range(max_chunk_retries):
+                try:
+                    resp = requests.put(
+                        upload_uri,
+                        headers={
+                            **self._auth,
+                            "Content-Length": str(len(chunk)),
+                            "Content-Range": f"bytes {offset}-{end - 1}/{total_size}",
+                        },
+                        data=chunk,
+                        timeout=self._upload_timeout(chunk_size),
+                    )
+                    break
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    if attempt == max_chunk_retries - 1:
+                        raise
+                    wait = 1.0 * (attempt + 1)
+                    logger.warning(
+                        "Chunk upload failed (attempt %d/%d, offset %d): %s — retrying in %.1fs",
+                        attempt + 1, max_chunk_retries, offset, exc, wait,
+                    )
+                    time.sleep(wait)
+
+            if resp.status_code == 308:
+                # Partial success — server tells us how far it got
+                range_hdr = resp.headers.get("Range", resp.headers.get("range", ""))
+                if range_hdr and "-" in range_hdr:
+                    offset = int(range_hdr.split("-")[-1]) + 1
+                else:
+                    offset = end
+                continue
+
+            if resp.ok:
+                return resp.json()
+
+            raise DriveKitError(resp.status_code, resp.text[:500])
+
+        raise DriveKitError(500, "Resumable upload ended without final response")
+
+    def create_file_resumable(
+        self,
+        filename: str,
+        content: bytes,
+        mime_type: str = "application/octet-stream",
+        parent_folder: str = "applicationData",
+        fields: str = DEFAULT_FIELDS,
+        chunk_size: int = 8 * 1024 * 1024,
+    ) -> dict:
+        """Create file using resumable (chunked) upload for large files."""
+        meta = {
+            "fileName": filename,
+            "mimeType": mime_type,
+            "parentFolder": [parent_folder],
+        }
+        upload_uri = self._initiate_resumable(
+            "POST",
+            f"{UPLOAD_BASE}/files",
+            meta,
+            total_size=len(content),
+            content_type=mime_type,
+            fields=fields,
+        )
+        return self._upload_chunks(upload_uri, content, chunk_size)
+
+    def update_file_resumable(
+        self,
+        file_id: str,
+        content: bytes,
+        mime_type: str = "application/octet-stream",
+        fields: str = DEFAULT_FIELDS,
+        chunk_size: int = 8 * 1024 * 1024,
+    ) -> dict:
+        """Update file content using resumable (chunked) upload for large files."""
+        upload_uri = self._initiate_resumable(
+            "PATCH",
+            f"{UPLOAD_BASE}/files/{file_id}",
+            {},
+            total_size=len(content),
+            content_type=mime_type,
+            fields=fields,
+        )
+        return self._upload_chunks(upload_uri, content, chunk_size)
 
     def get_file(self, file_id: str, fields: str = DEFAULT_FIELDS) -> dict:
         """Get file metadata."""

@@ -25,6 +25,8 @@ DEFAULT_CACHE_MAX_FILES = 500
 DEFAULT_WRITE_BUF_DIR = "/tmp/clawfuse-writes"
 DEFAULT_DRAIN_INTERVAL = 5.0
 DEFAULT_DRAIN_MAX_RETRIES = 3
+DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024   # 8MB — must be power of 2, 256K–64MB
+DEFAULT_UPLOAD_CUTOFF = 20 * 1024 * 1024      # 20MB — multipart limit, use resumable above this
 DEFAULT_TREE_REFRESH_TTL = 10.0
 DEFAULT_LIST_PAGE_SIZE = 100
 DEFAULT_HTTP_TIMEOUT = 30
@@ -97,6 +99,10 @@ class Config:
     drain_interval: float = DEFAULT_DRAIN_INTERVAL
     drain_max_retries: int = DEFAULT_DRAIN_MAX_RETRIES
 
+    # Upload
+    upload_chunk_size: int = DEFAULT_UPLOAD_CHUNK_SIZE
+    upload_cutoff: int = DEFAULT_UPLOAD_CUTOFF
+
     # DirTree
     tree_refresh_ttl: float = DEFAULT_TREE_REFRESH_TTL
     list_page_size: int = DEFAULT_LIST_PAGE_SIZE
@@ -152,6 +158,8 @@ class Config:
             write_buf_dir=Path(data.get("write_buf_dir", DEFAULT_WRITE_BUF_DIR)),
             drain_interval=data.get("drain_interval", DEFAULT_DRAIN_INTERVAL),
             drain_max_retries=data.get("drain_max_retries", DEFAULT_DRAIN_MAX_RETRIES),
+            upload_chunk_size=data.get("upload_chunk_size", DEFAULT_UPLOAD_CHUNK_SIZE),
+            upload_cutoff=data.get("upload_cutoff", DEFAULT_UPLOAD_CUTOFF),
             tree_refresh_ttl=data.get("tree_refresh_ttl", DEFAULT_TREE_REFRESH_TTL),
             list_page_size=data.get("list_page_size", DEFAULT_LIST_PAGE_SIZE),
             http_timeout=data.get("http_timeout", DEFAULT_HTTP_TIMEOUT),
@@ -183,6 +191,8 @@ class Config:
             write_buf_dir=_env_path("CLAWFUSE_WRITE_BUF_DIR", DEFAULT_WRITE_BUF_DIR) or Path(DEFAULT_WRITE_BUF_DIR),
             drain_interval=_env_float("CLAWFUSE_DRAIN_INTERVAL", DEFAULT_DRAIN_INTERVAL),
             drain_max_retries=_env_int("CLAWFUSE_DRAIN_MAX_RETRIES", DEFAULT_DRAIN_MAX_RETRIES),
+            upload_chunk_size=_env_int("CLAWFUSE_UPLOAD_CHUNK_SIZE", DEFAULT_UPLOAD_CHUNK_SIZE),
+            upload_cutoff=_env_int("CLAWFUSE_UPLOAD_CUTOFF", DEFAULT_UPLOAD_CUTOFF),
             tree_refresh_ttl=_env_float("CLAWFUSE_TREE_REFRESH_TTL", DEFAULT_TREE_REFRESH_TTL),
             list_page_size=_env_int("CLAWFUSE_LIST_PAGE_SIZE", DEFAULT_LIST_PAGE_SIZE),
             http_timeout=_env_int("CLAWFUSE_HTTP_TIMEOUT", DEFAULT_HTTP_TIMEOUT),
